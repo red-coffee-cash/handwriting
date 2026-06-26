@@ -6,7 +6,17 @@
 <link rel="stylesheet" href="/static/gui/style.css">
 </head>
 <body>
-<div id="app">
+<div id="upload-screen">
+  <div id="upload-box">
+    <h1>Worksheet Layout Editor</h1>
+    <p>Upload a worksheet PDF to detect its questions and start placing answers.</p>
+    <input type="file" id="pdf-input" accept="application/pdf">
+    <button id="upload-btn">Upload &amp; Extract Questions</button>
+    <div id="upload-status"></div>
+  </div>
+</div>
+
+<div id="app" style="display:none">
   <aside id="sidebar">
     <div id="page-nav">
       <button id="prev-page">&larr;</button>
@@ -14,7 +24,8 @@
       <button id="next-page">&rarr;</button>
     </div>
     <ul id="question-list"></ul>
-    <button id="confirm-btn">Confirm Layout &amp; Finish</button>
+    <button id="confirm-btn">Finish: Render &amp; Download PDF</button>
+    <button id="new-worksheet-btn">Start New Worksheet</button>
     <div id="confirm-status"></div>
   </aside>
 
