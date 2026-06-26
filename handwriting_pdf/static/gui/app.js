@@ -37,14 +37,47 @@ function setStatus(msg) { $("status-bar").textContent = msg || ""; }
 
 // ---------- session / page loading ----------
 
+function showUpload() {
+  document.getElementById("upload-screen").style.display = "flex";
+  document.getElementById("app").style.display = "none";
+}
+
+function showApp() {
+  document.getElementById("upload-screen").style.display = "none";
+  document.getElementById("app").style.display = "flex";
+}
+
 async function loadSession() {
-  state.session = await api("GET", "/api/session");
+  const resp = await fetch("/api/session");
+  if (resp.status === 404) {
+    showUpload();
+    return;
+  }
+  state.session = await resp.json();
+  showApp();
   if (!state.activeQid) {
     const first = state.session.questions.find(q => !q.deleted);
     if (first) { state.activeQid = first.id; state.pageNum = first.box.page; }
   }
   renderQuestionList();
   await loadPage(state.pageNum);
+}
+
+async function uploadPdf(file) {
+  const formData = new FormData();
+  formData.append("pdf", file);
+  const uploadStatus = $("upload-status");
+  uploadStatus.textContent = "Extracting questions...";
+  try {
+    const resp = await fetch("/api/upload", { method: "POST", body: formData });
+    const data = await resp.json();
+    if (!resp.ok || !data.ok) throw new Error(data.error || "Upload failed.");
+    state.activeQid = null;
+    state.history = {};
+    await loadSession();
+  } catch (e) {
+    uploadStatus.textContent = e.message;
+  }
 }
 
 function pageCount() { return state.session.pages.length; }
@@ -489,8 +522,31 @@ $("restore-q-btn").addEventListener("click", async () => {
 });
 
 $("confirm-btn").addEventListener("click", async () => {
-  await api("POST", "/api/session/confirm");
-  $("confirm-status").textContent = "Layout confirmed.";
+  $("confirm-status").textContent = "Rendering...";
+  try {
+    await api("POST", "/api/session/confirm");
+    $("confirm-status").textContent = "Done. Downloading finished PDF...";
+    window.location.href = "/api/render";
+  } catch (e) {
+    $("confirm-status").textContent = e.message;
+  }
+});
+
+$("new-worksheet-btn").addEventListener("click", async () => {
+  if (!window.confirm("Start a new worksheet? This discards the current session.")) return;
+  await api("POST", "/api/session/reset");
+  state.session = null;
+  state.activeQid = null;
+  state.history = {};
+  $("upload-status").textContent = "";
+  $("pdf-input").value = "";
+  showUpload();
+});
+
+$("upload-btn").addEventListener("click", () => {
+  const file = $("pdf-input").files[0];
+  if (!file) { $("upload-status").textContent = "Choose a PDF first."; return; }
+  uploadPdf(file);
 });
 
 $("undo-btn").addEventListener("click", undo);

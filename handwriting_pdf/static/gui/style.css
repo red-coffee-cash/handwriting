@@ -10,6 +10,55 @@ body {
   display: flex;
   height: 100vh;
 }
+#upload-screen {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+}
+#upload-box {
+  background: #fff;
+  border: 1px solid #ddd;
+  border-radius: 10px;
+  padding: 32px 40px;
+  text-align: center;
+  max-width: 420px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.08);
+}
+#upload-box h1 {
+  font-size: 18px;
+  margin: 0 0 8px;
+}
+#upload-box p {
+  color: #555;
+  margin: 0 0 16px;
+}
+#upload-box input[type="file"] {
+  display: block;
+  margin: 0 auto 16px;
+}
+#upload-box button {
+  padding: 10px 16px;
+  background: #3a6df0;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 600;
+}
+#upload-status {
+  margin-top: 12px;
+  font-size: 12px;
+  color: #555;
+}
+#new-worksheet-btn {
+  margin-top: 6px;
+  padding: 8px;
+  background: #fafafa;
+  border: 1px solid #ccc;
+  border-radius: 6px;
+  cursor: pointer;
+}
 #sidebar {
   width: 300px;
   flex: none;

@@ -9,6 +9,7 @@ the wire in PDF points; the frontend converts to/from canvas pixels using
 the page size returned by /api/page/<n>/size.
 """
 import io
+import os
 
 from flask import Flask, jsonify, request, send_file, send_from_directory
 
@@ -16,6 +17,8 @@ import fitz
 
 import gemma_client
 import layout_session as ls
+import pdf_compose
+import pdf_extract
 import render_box
 
 STATIC_DIR = "static/gui"
@@ -32,6 +35,9 @@ def create_app(session_path, ollama_url=gemma_client.DEFAULT_OLLAMA_URL, model=g
             state["doc"] = fitz.open(session["source_pdf"])
         return state["doc"]
 
+    def _workspace_dir():
+        return os.path.dirname(os.path.abspath(session_path)) or "."
+
     @app.get("/")
     def index():
         return send_from_directory(STATIC_DIR, "index.html")
@@ -42,7 +48,40 @@ def create_app(session_path, ollama_url=gemma_client.DEFAULT_OLLAMA_URL, model=g
 
     @app.get("/api/session")
     def get_session():
+        if not os.path.exists(session_path):
+            return jsonify({"exists": False}), 404
         return jsonify(ls.load(session_path))
+
+    @app.post("/api/upload")
+    def upload_pdf():
+        """Accept a worksheet PDF uploaded from the browser, extract its
+        questions, and create a fresh session at session_path -- this is
+        what lets the whole pipeline run from the GUI with no CLI step."""
+        file = request.files.get("pdf")
+        if file is None or not file.filename:
+            return jsonify({"ok": False, "error": "No PDF file provided."}), 400
+
+        workspace_dir = _workspace_dir()
+        os.makedirs(workspace_dir, exist_ok=True)
+        source_pdf_path = os.path.join(workspace_dir, "source.pdf")
+        file.save(source_pdf_path)
+
+        doc = pdf_extract.load_pdf(source_pdf_path)
+        questions = pdf_extract.build_question_records(doc)
+        pages = [{"width": p.rect.width, "height": p.rect.height} for p in doc]
+        session = ls.new_session(source_pdf_path, pages, questions)
+        ls.save(session, session_path)
+        state["doc"] = None
+        return jsonify({"ok": True, "session": session})
+
+    @app.post("/api/session/reset")
+    def reset_session():
+        """Discard the current session so the GUI shows the upload screen
+        again, for starting a new worksheet without restarting the server."""
+        if os.path.exists(session_path):
+            os.remove(session_path)
+        state["doc"] = None
+        return jsonify({"ok": True})
 
     @app.get("/api/page/<int:page_num>.png")
     def page_png(page_num):
@@ -128,6 +167,15 @@ def create_app(session_path, ollama_url=gemma_client.DEFAULT_OLLAMA_URL, model=g
         session["confirmed"] = True
         ls.save(session, session_path)
         return jsonify({"ok": True})
+
+    @app.get("/api/render")
+    def render_and_download():
+        """Composite the session's strokes onto the source PDF and return
+        the result as a downloadable file, so finishing a worksheet never
+        requires leaving the browser."""
+        out_path = os.path.join(_workspace_dir(), "filled.pdf")
+        pdf_compose.compose(session_path, out_path)
+        return send_file(out_path, as_attachment=True, download_name="filled_worksheet.pdf")
 
     return app
 
