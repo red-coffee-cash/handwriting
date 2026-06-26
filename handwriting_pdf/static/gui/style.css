@@ -1,0 +1,131 @@
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: system-ui, sans-serif;
+  font-size: 14px;
+  color: #222;
+  background: #f4f4f6;
+}
+#app {
+  display: flex;
+  height: 100vh;
+}
+#sidebar {
+  width: 300px;
+  flex: none;
+  background: #fff;
+  border-right: 1px solid #ddd;
+  display: flex;
+  flex-direction: column;
+  padding: 10px;
+  overflow-y: auto;
+}
+#page-nav {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+#question-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  flex: 1;
+  overflow-y: auto;
+}
+#question-list li {
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  padding: 8px;
+  margin-bottom: 6px;
+  cursor: pointer;
+}
+#question-list li.active {
+  border-color: #3a6df0;
+  background: #eef2ff;
+}
+#question-list li.deleted {
+  opacity: 0.5;
+  text-decoration: line-through;
+}
+#question-list .q-text {
+  font-size: 12px;
+  white-space: pre-wrap;
+  max-height: 4.5em;
+  overflow: hidden;
+}
+#question-list .q-meta {
+  font-size: 11px;
+  color: #777;
+  margin-top: 4px;
+}
+#confirm-btn {
+  margin-top: 8px;
+  padding: 10px;
+  background: #1f8a3d;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 600;
+}
+#confirm-status {
+  margin-top: 6px;
+  font-size: 12px;
+  text-align: center;
+  color: #1f8a3d;
+}
+#stage-wrap {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+#toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  align-items: center;
+  padding: 8px 12px;
+  background: #fff;
+  border-bottom: 1px solid #ddd;
+}
+.tool-group {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.tool-btn, #toolbar button {
+  padding: 6px 10px;
+  border: 1px solid #ccc;
+  background: #fafafa;
+  border-radius: 5px;
+  cursor: pointer;
+}
+.tool-btn.active {
+  background: #3a6df0;
+  color: #fff;
+  border-color: #3a6df0;
+}
+#canvas-scroll {
+  flex: 1;
+  overflow: auto;
+  background: #888;
+  display: flex;
+  justify-content: center;
+  padding: 20px;
+}
+#stage {
+  background: #fff;
+  box-shadow: 0 0 8px rgba(0,0,0,0.3);
+  cursor: crosshair;
+}
+#status-bar {
+  padding: 6px 12px;
+  font-size: 12px;
+  color: #555;
+  background: #fff;
+  border-top: 1px solid #ddd;
+  min-height: 1.4em;
+}

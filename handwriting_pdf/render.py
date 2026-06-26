@@ -1,18 +1,15 @@
 """Render sampled pen strokes onto a PDF page.
 
-Path construction follows the original reference implementation
-(sjvasquez/handwriting-synthesis demo.py `_draw`): straight-line segments
-only, broken into a new sub-path every time a point's end-of-stroke flag is
-set, plus a 1.5x coordinate scale applied before the denoise/align cleanup.
-Legibility comes from the density of points the RNN emits, not from curve
-fitting, so no bezier smoothing is applied here.
+Stroke-to-path conversion lives in drawing.strokes_to_path_segments; see
+that docstring for the rendering convention (straight-line segments, no
+bezier smoothing).
 """
 import textwrap
 
 from reportlab.lib.pagesizes import LETTER
 from reportlab.pdfgen import canvas
 
-import drawing
+from drawing import strokes_to_path_segments as _strokes_to_path_segments
 from sample import sample_strokes
 
 PAGE_WIDTH, PAGE_HEIGHT = LETTER
@@ -30,27 +27,6 @@ def wrap_text(text, max_chars=MAX_LINE_CHARS):
         wrapped = textwrap.wrap(paragraph, width=max_chars) or [""]
         lines.extend(wrapped)
     return lines
-
-
-def _strokes_to_path_segments(offsets):
-    """offsets: (N, 3) array of (dx, dy, eos). Returns list of point-lists,
-    each representing one continuous pen-down stroke to draw as straight lines."""
-    offsets = offsets.copy()
-    offsets[:, :2] *= 1.5
-    coords = drawing.offsets_to_coords(offsets)
-    coords = drawing.denoise(coords)
-    coords[:, :2] = drawing.align(coords[:, :2])
-
-    segments = []
-    current = []
-    for x, y, eos in coords:
-        current.append((x, y))
-        if eos == 1:
-            segments.append(current)
-            current = []
-    if current:
-        segments.append(current)
-    return segments
 
 
 def render_pdf(text, out_path, bias=0.75, style_prime=True, seed=None):
