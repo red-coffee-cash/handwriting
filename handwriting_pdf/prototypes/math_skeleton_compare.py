@@ -161,7 +161,16 @@ def skeleton_to_polylines(mask):
     return polylines
 
 
-def jitter_polylines(polylines, point_sigma, tremor_amp, tremor_freq, seed):
+def jitter_polylines(polylines, tremor_amp, wavelength_pt, seed, px_per_pt=1.0):
+    """Smooth hand-tremor wobble, not random per-point noise.
+
+    Real handwriting wobble is a slow, smooth wave along the pen's travel,
+    not high-frequency jaggedness -- so phase is driven by cumulative arc
+    length (in points) rather than by point index. That also keeps the
+    wavelength visually consistent regardless of how many skeleton pixels
+    a given stroke happens to contain, so tiny glyphs (exponents, indices)
+    don't get more wave cycles crammed into them than large ones.
+    """
     rng = np.random.default_rng(seed)
     out = []
     for poly in polylines:
@@ -169,12 +178,19 @@ def jitter_polylines(polylines, point_sigma, tremor_amp, tremor_freq, seed):
         if n < 2:
             out.append(poly)
             continue
-        t = np.linspace(0, 1, n)
-        tremor = tremor_amp * np.sin(2 * np.pi * tremor_freq * t + rng.uniform(0, 2 * np.pi))
-        noise = rng.normal(scale=point_sigma, size=(n, 2))
-        jittered = poly.copy()
-        jittered[:, 1] += tremor
-        jittered += noise
+        seg_lengths = np.linalg.norm(np.diff(poly, axis=0), axis=1) / px_per_pt
+        arc = np.concatenate([[0.0], np.cumsum(seg_lengths)])
+        phase = rng.uniform(0, 2 * np.pi)
+        # perpendicular (normal) direction at each point, so the wobble
+        # pushes sideways off the stroke's own heading rather than just
+        # vertically -- matches how a wavering pen actually moves.
+        tangent = np.gradient(poly, axis=0)
+        tnorm = np.linalg.norm(tangent, axis=1, keepdims=True)
+        tnorm[tnorm == 0] = 1.0
+        tangent /= tnorm
+        normal = np.stack([-tangent[:, 1], tangent[:, 0]], axis=1)
+        wobble = tremor_amp * np.sin(2 * np.pi * arc / wavelength_pt + phase)
+        jittered = poly + normal * wobble[:, None] * px_per_pt
         out.append(jittered)
     return out
 
@@ -190,7 +206,7 @@ def polylines_to_points(polylines, mask_height, px_per_pt):
     return out
 
 
-def draw_polylines(c, polylines, x0, y0, stroke_width=0.9):
+def draw_polylines(c, polylines, x0, y0, stroke_width=1.4):
     c.setLineWidth(stroke_width)
     c.setLineJoin(1)
     c.setLineCap(1)
@@ -235,8 +251,10 @@ def render_snippet(c, snippet, x0, y0, target_pt_height=24, jitter=None):
 
     pts_polylines = polylines_to_points(polylines, h_px, px_per_pt)
     if jitter:
-        sigma, tremor = jitter
-        pts_polylines = jitter_polylines(pts_polylines, sigma, tremor, tremor_freq=2.0, seed=hash(snippet) % 1000)
+        tremor_amp, wavelength_pt = jitter
+        pts_polylines = jitter_polylines(
+            pts_polylines, tremor_amp, wavelength_pt, seed=hash(snippet) % 1000
+        )
     draw_polylines(c, pts_polylines, x0, y0)
 
 
@@ -251,8 +269,9 @@ def main():
     row_h = 75
 
     variants = [
-        ("C1: skeleton trace, no jitter", None),
-        ("C2: skeleton trace, light jitter", (0.3, 1.2)),
+        ("D1: no jitter, thicker stroke", None),
+        ("D2: subtle smooth wave (amp=0.35pt, wavelength=36pt)", (0.35, 36)),
+        ("D3: medium smooth wave (amp=0.6pt, wavelength=28pt)", (0.6, 28)),
     ]
 
     for label, jitter in variants:
