@@ -47,3 +47,57 @@ Options:
 - `render.py` — stroke-to-PDF rendering and page/line layout.
 - `text_to_handwriting.py` — CLI entry point.
 - `weights/` — pretrained weights (`model_weights.npz`) and the priming sample.
+
+## Worksheet pipeline (fill in a PDF worksheet with generated handwriting)
+
+A second, separate pipeline takes a worksheet PDF, generates an answer for
+each detected question with a local Gemma model (via [Ollama](https://ollama.com)),
+renders those answers as handwriting (math expressions included, via a
+handwriting-font skeleton-traced renderer), and lets you place/edit
+everything in a browser GUI before compositing the result back onto the PDF.
+
+No API keys are involved — Ollama serves Gemma fully locally. Install it and
+pull a model first:
+
+```
+ollama pull gemma3:4b
+```
+
+### Usage
+
+```
+pip install -r requirements.txt
+
+# 1. Detect questions + suggested answer boxes
+python worksheet_cli.py extract --pdf worksheet.pdf --session session.json
+
+# 2. Open the GUI: place/resize answer boxes, click Generate per question,
+#    hand-edit strokes with the pen/eraser tools, then click
+#    "Confirm Layout & Finish" in the browser
+python worksheet_cli.py serve --session session.json
+# -> open http://127.0.0.1:5000
+
+# 3. Composite the finalized handwriting onto the source PDF
+python worksheet_cli.py render --session session.json --out filled.pdf
+```
+
+Or do all three in one go with `worksheet_cli.py run --pdf worksheet.pdf
+--session session.json --out filled.pdf` (serves the GUI, then renders
+automatically once you confirm and stop the server with Ctrl-C).
+
+The GUI's toolbar has four tools: **Select** (move/resize an answer box via
+its handles), **Box** (draw a new answer box from scratch), **Pen** (freehand
+strokes, for fixing/adding handwriting by hand), and **Eraser** (click-drag
+to remove parts of strokes near the cursor). Every edit auto-saves to the
+session file, and Undo/Redo walk a per-question history of stroke edits.
+
+### Files
+
+- `pdf_extract.py` — heuristic question detection + answer-box suggestion from a worksheet PDF.
+- `gemma_client.py` — queries a local Ollama-served Gemma model for an answer, split into text/math runs.
+- `math_render.py` — renders a LaTeX math snippet as handwriting-style strokes (rasterize a handwriting font, skeletonize to centerlines, add a smooth arc-length-parametrized "hand tremor").
+- `render_box.py` — lays out an answer's text+math runs to fit inside a confirmed on-page box, shrinking line height in tiers before falling back to a uniform scale-down.
+- `layout_session.py` — the session JSON schema shared across extract/serve/render (questions, boxes, answers, strokes, confirmation state).
+- `gui_app.py` + `static/gui/` — the local Flask + vanilla-JS placement/editing GUI (box placement, generate/regenerate, pen/eraser hand-editing, undo/redo).
+- `pdf_compose.py` — composites a confirmed session's strokes onto the source PDF.
+- `worksheet_cli.py` — ties the above into `extract` / `serve` / `render` / `run` subcommands.

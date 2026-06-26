@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Worksheet Layout Editor</title>
+<link rel="stylesheet" href="/static/gui/style.css">
+</head>
+<body>
+<div id="app">
+  <aside id="sidebar">
+    <div id="page-nav">
+      <button id="prev-page">&larr;</button>
+      <span id="page-label">Page 1 / 1</span>
+      <button id="next-page">&rarr;</button>
+    </div>
+    <ul id="question-list"></ul>
+    <button id="confirm-btn">Confirm Layout &amp; Finish</button>
+    <div id="confirm-status"></div>
+  </aside>
+
+  <main id="stage-wrap">
+    <div id="toolbar">
+      <div class="tool-group">
+        <button class="tool-btn" data-tool="select" title="Select / move box">Select</button>
+        <button class="tool-btn" data-tool="box" title="Draw answer box">Box</button>
+        <button class="tool-btn" data-tool="pen" title="Pen: draw strokes">Pen</button>
+        <button class="tool-btn" data-tool="eraser" title="Eraser: remove parts of strokes">Eraser</button>
+      </div>
+      <div class="tool-group">
+        <label>Pen width <input id="pen-width" type="range" min="0.6" max="4" step="0.2" value="1.4"></label>
+        <label>Eraser size <input id="eraser-size" type="range" min="4" max="40" step="1" value="14"></label>
+      </div>
+      <div class="tool-group">
+        <button id="undo-btn" title="Undo">&#8634; Undo</button>
+        <button id="redo-btn" title="Redo">&#8635; Redo</button>
+      </div>
+      <div class="tool-group">
+        <button id="generate-btn">Generate</button>
+        <button id="regenerate-btn">Regenerate</button>
+        <button id="delete-q-btn">Delete</button>
+        <button id="restore-q-btn">Restore</button>
+      </div>
+    </div>
+    <div id="canvas-scroll">
+      <canvas id="stage"></canvas>
+    </div>
+    <div id="status-bar"></div>
+  </main>
+</div>
+<script src="/static/gui/app.js"></script>
+</body>
+</html>

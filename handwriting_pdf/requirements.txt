@@ -2,3 +2,9 @@ torch
 numpy
 scipy
 reportlab
+pymupdf
+requests
+flask
+matplotlib
+scikit-image
+networkx

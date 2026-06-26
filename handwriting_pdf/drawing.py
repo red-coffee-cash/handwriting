@@ -71,3 +71,32 @@ def denoise(coords):
 def offsets_to_coords(offsets):
     """Convert from (dx, dy, eos) offsets to cumulative (x, y, eos) coordinates."""
     return np.concatenate([np.cumsum(offsets[:, :2], axis=0), offsets[:, 2:3]], axis=1)
+
+
+def strokes_to_path_segments(offsets):
+    """offsets: (N, 3) array of (dx, dy, eos). Returns list of point-lists,
+    each representing one continuous pen-down stroke to draw as straight lines.
+
+    Path construction follows the original reference implementation
+    (sjvasquez/handwriting-synthesis demo.py `_draw`): straight-line segments
+    only, broken into a new sub-path every time a point's end-of-stroke flag
+    is set, plus a 1.5x coordinate scale applied before the denoise/align
+    cleanup. Legibility comes from the density of points the RNN emits, not
+    from curve fitting, so no bezier smoothing is applied here.
+    """
+    offsets = offsets.copy()
+    offsets[:, :2] *= 1.5
+    coords = offsets_to_coords(offsets)
+    coords = denoise(coords)
+    coords[:, :2] = align(coords[:, :2])
+
+    segments = []
+    current = []
+    for x, y, eos in coords:
+        current.append((x, y))
+        if eos == 1:
+            segments.append(current)
+            current = []
+    if current:
+        segments.append(current)
+    return segments
