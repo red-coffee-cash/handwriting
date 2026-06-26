@@ -202,7 +202,12 @@ def _polylines_to_points(polylines, mask_height_px, px_per_pt):
 
 
 def render_math_strokes(snippet, font_size_pt=24, jitter=True, seed=0):
-    """Render a $...$-delimited mathtext snippet to hand-sketched strokes.
+    """Render a mathtext snippet to hand-sketched strokes.
+
+    `snippet` is the bare LaTeX/mathtext content (e.g. r"\frac{a}{b}"),
+    matching what gemma_client.split_runs hands back for math runs --
+    surrounding $ delimiters are added automatically if not already
+    present, since matplotlib only parses text between them as mathtext.
 
     Returns (strokes, width_pt, height_pt):
       strokes    -- list of (N, 2) point arrays in PDF points, origin at
@@ -211,7 +216,8 @@ def render_math_strokes(snippet, font_size_pt=24, jitter=True, seed=0):
       width_pt, height_pt -- bounding size, for layout/scaling.
     """
     _ensure_font_registered()
-    mask, px_per_pt = _rasterize(snippet, size_pt=font_size_pt)
+    mathtext = snippet if snippet.startswith("$") and snippet.endswith("$") else f"${snippet}$"
+    mask, px_per_pt = _rasterize(mathtext, size_pt=font_size_pt)
     polylines = _skeleton_to_polylines(mask)
     h_px = mask.shape[0]
     strokes = _polylines_to_points(polylines, h_px, px_per_pt)
