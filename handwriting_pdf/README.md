@@ -76,7 +76,7 @@ No API keys are involved — Ollama serves Gemma fully locally. Install it and
 pull a model first:
 
 ```
-ollama pull gemma3:4b
+ollama pull gemma4:12b
 ```
 
 ### Quick start (everything in the browser)

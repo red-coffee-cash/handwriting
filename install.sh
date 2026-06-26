@@ -9,7 +9,7 @@ set -euo pipefail
 REPO_URL="https://github.com/red-coffee-cash/handwriting.git"
 INSTALL_DIR="${HANDWRITING_INSTALL_DIR:-$PWD/handwriting}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
-OLLAMA_MODEL="${OLLAMA_MODEL:-gemma3:4b}"
+OLLAMA_MODEL="${OLLAMA_MODEL:-gemma4:12b}"
 
 bold()  { printf '\033[1m%s\033[0m\n' "$*"; }
 info()  { printf '\033[34m==>\033[0m %s\n' "$*"; }
