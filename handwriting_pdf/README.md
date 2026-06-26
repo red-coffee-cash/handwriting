@@ -26,10 +26,26 @@ Output is rendered as vector paths (straight line segments between sampled
 points, broken at each pen-lift) directly onto a PDF page via ReportLab — no
 raster images involved.
 
+## Installation
+
+One-line installer (clones the repo, creates a venv, installs Python deps,
+and checks for an Ollama install/model pull):
+
+```
+curl -fsSL https://raw.githubusercontent.com/red-coffee-cash/handwriting/claude/text-handwriting-ml-pdf-rj2g4w/install.sh | bash
+```
+
+Or manually:
+
+```
+git clone https://github.com/red-coffee-cash/handwriting.git
+cd handwriting/handwriting_pdf
+pip install -r requirements.txt
+```
+
 ## Usage
 
 ```
-pip install -r requirements.txt
 python text_to_handwriting.py --text "Hello, world!" --out hello.pdf
 python text_to_handwriting.py --file letter.txt --out letter.pdf --bias 1.0 --seed 42
 ```
@@ -63,33 +79,47 @@ pull a model first:
 ollama pull gemma3:4b
 ```
 
-### Usage
+### Quick start (everything in the browser)
+
+The GUI is self-contained: start it once, then upload, edit, and download
+without touching the CLI again.
 
 ```
 pip install -r requirements.txt
-
-# 1. Detect questions + suggested answer boxes
-python worksheet_cli.py extract --pdf worksheet.pdf --session session.json
-
-# 2. Open the GUI: place/resize answer boxes, click Generate per question,
-#    hand-edit strokes with the pen/eraser tools, then click
-#    "Confirm Layout & Finish" in the browser
 python worksheet_cli.py serve --session session.json
-# -> open http://127.0.0.1:5000
+# -> open http://127.0.0.1:5000, upload a worksheet PDF, and go
+```
 
-# 3. Composite the finalized handwriting onto the source PDF
+In the browser:
+1. Upload a worksheet PDF — questions and suggested answer boxes are
+   detected automatically.
+2. Pick a question, adjust its answer box (the **Select**/**Box** tools),
+   click **Generate** to get an answer from Gemma, and hand-edit the
+   resulting strokes with the **Pen**/**Eraser** tools if needed.
+3. Click **"Finish: Render & Download PDF"** to composite everything onto
+   the original PDF and download it — no separate render step required.
+4. Click **"Start New Worksheet"** to discard the session and upload another.
+
+The toolbar has four tools: **Select** (move/resize an answer box via its
+handles), **Box** (draw a new answer box from scratch), **Pen** (freehand
+strokes, for fixing/adding handwriting by hand), and **Eraser** (click-drag
+to remove parts of strokes near the cursor). Every edit auto-saves to the
+session file, and Undo/Redo walk a per-question history of stroke edits.
+
+### Scripted / CLI usage
+
+The same steps are also available as separate CLI subcommands, useful for
+automation or batch processing:
+
+```
+python worksheet_cli.py extract --pdf worksheet.pdf --session session.json
+python worksheet_cli.py serve --session session.json   # edit in the GUI, then confirm
 python worksheet_cli.py render --session session.json --out filled.pdf
 ```
 
 Or do all three in one go with `worksheet_cli.py run --pdf worksheet.pdf
 --session session.json --out filled.pdf` (serves the GUI, then renders
 automatically once you confirm and stop the server with Ctrl-C).
-
-The GUI's toolbar has four tools: **Select** (move/resize an answer box via
-its handles), **Box** (draw a new answer box from scratch), **Pen** (freehand
-strokes, for fixing/adding handwriting by hand), and **Eraser** (click-drag
-to remove parts of strokes near the cursor). Every edit auto-saves to the
-session file, and Undo/Redo walk a per-question history of stroke edits.
 
 ### Files
 
