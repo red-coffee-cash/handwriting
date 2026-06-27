@@ -10,12 +10,21 @@ handwriting RNN.
 """
 import json
 import re
+import shutil
+import subprocess
+import time
 
 import requests
 
-DEFAULT_OLLAMA_URL = "http://localhost:11434"
+# Explicit 127.0.0.1, not "localhost" -- on dual-stack systems "localhost"
+# can resolve to ::1 first, and since Ollama only binds IPv4 by default that
+# produces a connection-refused error even while IPv4 access works fine.
+DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
 DEFAULT_MODEL = "gemma4:12b"
 REQUEST_TIMEOUT = 120
+STARTUP_TIMEOUT = 30
+
+_ollama_launched = False
 
 SYSTEM_PROMPT = (
     "You are completing a worksheet. Given a question, respond with a JSON "
@@ -37,6 +46,7 @@ def generate_answer(question_text, model=DEFAULT_MODEL, ollama_url=DEFAULT_OLLAM
     answer string (which may contain $...$ math runs). Retries once on a
     malformed JSON response before falling back to treating the raw model
     output as a plain-text answer."""
+    _ensure_ollama_running(ollama_url)
     raw = _call_ollama(question_text, model, ollama_url)
     answer = _parse_answer_json(raw)
     if answer is not None:
@@ -48,6 +58,45 @@ def generate_answer(question_text, model=DEFAULT_MODEL, ollama_url=DEFAULT_OLLAM
         return answer
 
     return raw_retry.strip() or raw.strip()
+
+
+def _ollama_reachable(ollama_url):
+    try:
+        requests.get(f"{ollama_url}/api/tags", timeout=2)
+        return True
+    except requests.RequestException:
+        return False
+
+
+def _ensure_ollama_running(ollama_url):
+    """Start `ollama serve` if it isn't already up. No-op once it's
+    reachable; only attempted once per process even if startup fails."""
+    global _ollama_launched
+    if _ollama_reachable(ollama_url):
+        return
+
+    if shutil.which("ollama") is None:
+        raise GemmaClientError(
+            "Ollama is not running and the `ollama` command was not found "
+            "on PATH. Install it from https://ollama.com/download, then "
+            "run `ollama serve`."
+        )
+
+    if not _ollama_launched:
+        subprocess.Popen(
+            ["ollama", "serve"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        _ollama_launched = True
+
+    deadline = time.monotonic() + STARTUP_TIMEOUT
+    while time.monotonic() < deadline:
+        if _ollama_reachable(ollama_url):
+            return
+        time.sleep(0.5)
+    raise GemmaClientError(f"Timed out waiting for Ollama to start at {ollama_url}.")
 
 
 def _call_ollama(question_text, model, ollama_url, retry_hint=False):
