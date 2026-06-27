@@ -23,7 +23,7 @@ import requests
 # produces a connection-refused error even while IPv4 access works fine.
 DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
 DEFAULT_MODEL = "gemma4:12b"
-REQUEST_TIMEOUT = 120
+REQUEST_TIMEOUT = 300
 STARTUP_TIMEOUT = 30
 
 # Handle to the `ollama serve` process we launched (if any), plus the temp
