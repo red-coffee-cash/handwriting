@@ -463,9 +463,28 @@ textarea:focus-visible,
 .tool-btn.active {
   background: var(--accent);
   color: #fff;
-  border-color: var(--accent);
-  box-shadow: var(--shadow-sm);
+  border-color: var(--accent-strong);
+  font-weight: 600;
+  box-shadow: 0 0 0 3px var(--accent-tint-strong), var(--shadow-sm);
+  transform: translateY(-1px);
 }
+.tool-btn.active:hover {
+  background: var(--accent-strong);
+  border-color: var(--accent-strong);
+  color: #fff;
+}
+/* underline indicator beneath the selected tool */
+.tool-btn.active::after {
+  content: "";
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: -7px;
+  height: 3px;
+  border-radius: 3px;
+  background: var(--accent);
+}
+.tool-btn { position: relative; }
 
 /* Primary / success / danger emphasis on specific action buttons */
 #generate-btn {
@@ -540,15 +559,22 @@ input[type="range"]::-moz-range-thumb {
   border-top: 1px solid var(--border);
   min-height: 1.6em;
 }
-#status-bar::before {
-  content: "";
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--accent);
+#tool-indicator {
   flex: none;
-  opacity: 0.7;
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+  font-size: 11px;
+  letter-spacing: 0.3px;
+  padding: 2px 9px;
+  border-radius: 999px;
 }
+#tool-indicator::before {
+  content: "Tool: ";
+  opacity: 0.75;
+  font-weight: 500;
+}
+#status-msg { color: var(--ink-soft); }
 
 /* ============================================================
    Freeform / edit-text modal

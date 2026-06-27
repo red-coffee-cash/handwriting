@@ -33,7 +33,7 @@ async function api(method, url, body) {
   return data;
 }
 
-function setStatus(msg) { $("status-bar").textContent = msg || ""; }
+function setStatus(msg) { $("status-msg").textContent = msg || ""; }
 
 // ---------- session / page loading ----------
 
@@ -188,7 +188,7 @@ function draw() {
   }
 
   if (state.drag && (state.drag.type === "box-draw" || state.drag.type === "freeform-draw")) drawDragBox(state.drag);
-  if (state.drag && state.drag.type === "pen") drawLivePoints(state.drag.canvasPts, "#1f4fd6");
+  if (state.drag && state.drag.type === "pen") drawLivePoints(state.drag.canvasPts, "#111");
   if (state.drag && state.drag.type === "eraser") drawEraserCursor(state.drag);
 
   if (state.tool === "transform") {
@@ -329,7 +329,7 @@ function drawStrokes(strokes, color) {
   for (const s of strokes) {
     if (!s.points || s.points.length < 2) continue;
     ctx.beginPath();
-    ctx.strokeStyle = s.source === "user" ? "#1f4fd6" : color;
+    ctx.strokeStyle = s.source === "user" ? "#111" : color;
     ctx.lineWidth = Math.max(1, (s.width_pt || 1.4) * state.scale);
     ctx.lineJoin = "round";
     ctx.lineCap = "round";
@@ -427,9 +427,28 @@ async function selectQuestion(qid) {
 
 // ---------- tool handling ----------
 
+const TOOL_INFO = {
+  select: { name: "Select", hint: "move or resize a question's answer box", cursor: "default" },
+  box: { name: "Box", hint: "drag to draw an answer box", cursor: "crosshair" },
+  transform: { name: "Resize", hint: "drag inside to move, or a handle to scale the handwriting", cursor: "move" },
+  freeform: { name: "Freeform", hint: "drag a box, then type your own text", cursor: "crosshair" },
+  pen: { name: "Pen", hint: "draw freehand strokes", cursor: "crosshair" },
+  eraser: { name: "Eraser", hint: "drag over strokes to erase parts of them", cursor: "crosshair" },
+};
+
 function setTool(tool) {
   state.tool = tool;
   document.querySelectorAll(".tool-btn").forEach(b => b.classList.toggle("active", b.dataset.tool === tool));
+  const info = TOOL_INFO[tool] || { name: tool, hint: "", cursor: "default" };
+  const ind = $("tool-indicator");
+  ind.textContent = info.name;
+  ind.title = info.hint;
+  $("status-msg").textContent = info.hint ? `— ${info.hint}` : "";
+  canvas.style.cursor = info.cursor;
+  // Redraw so tool-specific overlays update immediately (e.g. the transform
+  // tool's stroke handles appear and the box handles hide) without waiting
+  // for the next pointer event.
+  if (state.session) draw();
 }
 
 canvas.addEventListener("pointerdown", onPointerDown);
