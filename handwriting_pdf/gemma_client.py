@@ -32,7 +32,13 @@ SYSTEM_PROMPT = (
     "and directly answer the question. If the answer involves mathematical "
     "notation, wrap each math expression in single dollar signs using LaTeX "
     "syntax, e.g. \"The result is $x^2 + 1$.\" Do not wrap plain words or "
-    "numbers in dollar signs -- only use them for actual math notation. "
+    "numbers in dollar signs -- only use them for actual math notation.\n"
+    "For a math problem, show only the work and the final solution -- the "
+    "calculation steps and the answer, all as math. Do NOT write any "
+    "explanation of why, any reasoning in words, or any English sentences "
+    "at all. The ONLY exception is if the problem itself explicitly asks "
+    "for an explanation, justification, or proof; in that case, write the "
+    "explanation or proof as required.\n"
     "Respond with only the JSON object, no other text."
 )
 

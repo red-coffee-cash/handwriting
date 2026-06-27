@@ -18,12 +18,17 @@ body {
 }
 #upload-box {
   background: #fff;
-  border: 1px solid #ddd;
+  border: 2px dashed #ddd;
   border-radius: 10px;
   padding: 32px 40px;
   text-align: center;
   max-width: 420px;
   box-shadow: 0 4px 16px rgba(0,0,0,0.08);
+  transition: border-color 0.15s, background 0.15s;
+}
+#upload-box.drag-over {
+  border-color: #3a6df0;
+  background: #eef2ff;
 }
 #upload-box h1 {
   font-size: 18px;
@@ -109,6 +114,16 @@ body {
   color: #777;
   margin-top: 4px;
 }
+.badge-manual {
+  display: inline-block;
+  background: #eef2ff;
+  color: #3a6df0;
+  border-radius: 3px;
+  padding: 0 4px;
+  font-size: 11px;
+  font-weight: 600;
+  margin-right: 4px;
+}
 #confirm-btn {
   margin-top: 8px;
   padding: 10px;
@@ -177,4 +192,34 @@ body {
   background: #fff;
   border-top: 1px solid #ddd;
   min-height: 1.4em;
+}
+#freeform-modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10;
+}
+#freeform-modal-box {
+  background: #fff;
+  border-radius: 10px;
+  padding: 20px 24px;
+  width: 420px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.2);
+}
+#freeform-modal-box h3 {
+  margin: 0 0 10px;
+  font-size: 16px;
+}
+#freeform-text {
+  width: 100%;
+  font-family: inherit;
+  font-size: 13px;
+  padding: 8px;
+  border: 1px solid #ccc;
+  border-radius: 6px;
+  resize: vertical;
+  margin-bottom: 10px;
 }

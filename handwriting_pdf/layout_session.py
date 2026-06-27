@@ -26,11 +26,16 @@ Schema (top-level dict):
       "answer": {"raw": str, "runs": [{"kind": "text"|"math", "value": str}]} | null,
       "strokes": [{"points": [[x, y], ...], "source": "generated"|"user"}],
       "deleted": bool,
+      "source": "manual" | absent,  # present only for user-created freeform
+                                     # boxes; their "text" is rendered directly
+                                     # (no Gemma call) instead of being an
+                                     # extracted question prompt
   }, ...]
   confirmed: bool
 """
 import json
 import os
+import uuid
 
 SCHEMA_VERSION = 1
 
@@ -43,6 +48,30 @@ def new_session(source_pdf, pages, questions):
         "questions": questions,
         "confirmed": False,
     }
+
+
+def new_freeform_question(session, page, box, text=""):
+    """A user-drawn box with user-typed text, rendered without Gemma --
+    otherwise identical to an extracted question record so it flows through
+    the same generate/regenerate/strokes/compose pipeline unmodified."""
+    q = {
+        "id": f"manual-{uuid.uuid4().hex[:8]}",
+        "text": text,
+        "page": page,
+        "match_bbox": None,
+        "box": {
+            "page": page,
+            "x0": box["x0"], "y0": box["y0"], "x1": box["x1"], "y1": box["y1"],
+            "user_edited": True,
+        },
+        "answer": None,
+        "strokes": [],
+        "deleted": False,
+        "seed": 0,
+        "source": "manual",
+    }
+    session["questions"].append(q)
+    return q
 
 
 def load(path):

@@ -91,20 +91,28 @@ python worksheet_cli.py serve --session session.json
 ```
 
 In the browser:
-1. Upload a worksheet PDF — questions and suggested answer boxes are
-   detected automatically.
+1. Upload a worksheet PDF (drag-and-drop onto the upload card, or use the
+   file picker) — questions and suggested answer boxes are detected
+   automatically.
 2. Pick a question, adjust its answer box (the **Select**/**Box** tools),
    click **Generate** to get an answer from Gemma, and hand-edit the
-   resulting strokes with the **Pen**/**Eraser** tools if needed.
-3. Click **"Finish: Render & Download PDF"** to composite everything onto
+   resulting strokes with the **Pen**/**Eraser** tools if needed. Click
+   **Edit Text** to correct a mis-extracted question's prompt before
+   regenerating.
+3. Use the **Freeform** tool to draw a box anywhere on the page that isn't
+   tied to a detected question, type or paste your own text into the popup
+   (wrap math in `$...$`), and click **Render** to turn it into handwriting
+   in that box — no Gemma call, just your text.
+4. Click **"Finish: Render & Download PDF"** to composite everything onto
    the original PDF and download it — no separate render step required.
-4. Click **"Start New Worksheet"** to discard the session and upload another.
+5. Click **"Start New Worksheet"** to discard the session and upload another.
 
-The toolbar has four tools: **Select** (move/resize an answer box via its
-handles), **Box** (draw a new answer box from scratch), **Pen** (freehand
-strokes, for fixing/adding handwriting by hand), and **Eraser** (click-drag
-to remove parts of strokes near the cursor). Every edit auto-saves to the
-session file, and Undo/Redo walk a per-question history of stroke edits.
+The toolbar has five tools: **Select** (move/resize an answer box via its
+handles), **Box** (draw a new answer box from scratch), **Freeform** (draw a
+box and supply your own text to render into it), **Pen** (freehand strokes,
+for fixing/adding handwriting by hand), and **Eraser** (click-drag to remove
+parts of strokes near the cursor). Every edit auto-saves to the session
+file, and Undo/Redo walk a per-question history of stroke edits.
 
 ### Scripted / CLI usage
 
@@ -128,6 +136,6 @@ automatically once you confirm and stop the server with Ctrl-C).
 - `math_render.py` — renders a LaTeX math snippet as handwriting-style strokes (rasterize a handwriting font, skeletonize to centerlines, add a smooth arc-length-parametrized "hand tremor").
 - `render_box.py` — lays out an answer's text+math runs to fit inside a confirmed on-page box, shrinking line height in tiers before falling back to a uniform scale-down.
 - `layout_session.py` — the session JSON schema shared across extract/serve/render (questions, boxes, answers, strokes, confirmation state).
-- `gui_app.py` + `static/gui/` — the local Flask + vanilla-JS placement/editing GUI (box placement, generate/regenerate, pen/eraser hand-editing, undo/redo).
+- `gui_app.py` + `static/gui/` — the local Flask + vanilla-JS placement/editing GUI (box placement, generate/regenerate, pen/eraser hand-editing, undo/redo, freeform manual-text boxes, question-text editing).
 - `pdf_compose.py` — composites a confirmed session's strokes onto the source PDF.
 - `worksheet_cli.py` — ties the above into `extract` / `serve` / `render` / `run` subcommands.
