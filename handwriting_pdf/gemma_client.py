@@ -9,9 +9,11 @@ math_render.py separately from the plain-text runs that go through the
 handwriting RNN.
 """
 import json
+import os
 import re
 import shutil
 import subprocess
+import tempfile
 import time
 
 import requests
@@ -24,7 +26,12 @@ DEFAULT_MODEL = "gemma4:12b"
 REQUEST_TIMEOUT = 120
 STARTUP_TIMEOUT = 30
 
-_ollama_launched = False
+# Handle to the `ollama serve` process we launched (if any), plus the temp
+# file capturing its stderr. Kept so we can detect an immediate crash and
+# surface the real reason instead of a generic timeout -- and so a failed
+# start can be retried on the next request rather than latching forever.
+_ollama_proc = None
+_ollama_stderr_path = None
 
 SYSTEM_PROMPT = (
     "You are completing a worksheet. Given a question, respond with a JSON "
@@ -55,15 +62,18 @@ def generate_answer(question_text, model=DEFAULT_MODEL, ollama_url=DEFAULT_OLLAM
     _ensure_ollama_running(ollama_url)
     raw = _call_ollama(question_text, model, ollama_url)
     answer = _parse_answer_json(raw)
-    if answer is not None:
-        return answer
+    if answer is None:
+        raw_retry = _call_ollama(question_text, model, ollama_url, retry_hint=True)
+        answer = _parse_answer_json(raw_retry)
+        if answer is None:
+            answer = raw_retry.strip() or raw.strip()
 
-    raw_retry = _call_ollama(question_text, model, ollama_url, retry_hint=True)
-    answer = _parse_answer_json(raw_retry)
-    if answer is not None:
-        return answer
-
-    return raw_retry.strip() or raw.strip()
+    if not answer.strip():
+        raise GemmaClientError(
+            "The model returned an empty answer. It may have produced no "
+            "output or only an empty JSON field; try regenerating."
+        )
+    return answer
 
 
 def _ollama_reachable(ollama_url):
@@ -74,12 +84,32 @@ def _ollama_reachable(ollama_url):
         return False
 
 
+def _read_ollama_stderr():
+    """Return whatever `ollama serve` wrote to stderr, trimmed, or ''."""
+    if not _ollama_stderr_path or not os.path.exists(_ollama_stderr_path):
+        return ""
+    try:
+        with open(_ollama_stderr_path, "r", errors="replace") as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
+
+
 def _ensure_ollama_running(ollama_url):
     """Start `ollama serve` if it isn't already up. No-op once it's
-    reachable; only attempted once per process even if startup fails."""
-    global _ollama_launched
+    reachable. If a process we launched dies, surface its stderr and allow a
+    fresh launch on the next call rather than latching into a permanent
+    failure state."""
+    global _ollama_proc, _ollama_stderr_path
     if _ollama_reachable(ollama_url):
         return
+
+    # If we previously launched one and it has since exited, fold its stderr
+    # into the error below and clear the handle so we can relaunch.
+    crashed_stderr = ""
+    if _ollama_proc is not None and _ollama_proc.poll() is not None:
+        crashed_stderr = _read_ollama_stderr()
+        _ollama_proc = None
 
     if shutil.which("ollama") is None:
         raise GemmaClientError(
@@ -88,21 +118,43 @@ def _ensure_ollama_running(ollama_url):
             "run `ollama serve`."
         )
 
-    if not _ollama_launched:
-        subprocess.Popen(
+    if _ollama_proc is None:
+        stderr_file = tempfile.NamedTemporaryFile(
+            prefix="ollama-serve-", suffix=".log", delete=False
+        )
+        _ollama_stderr_path = stderr_file.name
+        _ollama_proc = subprocess.Popen(
             ["ollama", "serve"],
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=stderr_file,
             start_new_session=True,
         )
-        _ollama_launched = True
+        stderr_file.close()
 
     deadline = time.monotonic() + STARTUP_TIMEOUT
     while time.monotonic() < deadline:
         if _ollama_reachable(ollama_url):
             return
+        if _ollama_proc.poll() is not None:
+            # The server we just launched exited before becoming reachable.
+            stderr = _read_ollama_stderr()
+            _ollama_proc = None
+            raise GemmaClientError(_startup_error(ollama_url, stderr))
         time.sleep(0.5)
-    raise GemmaClientError(f"Timed out waiting for Ollama to start at {ollama_url}.")
+    raise GemmaClientError(_startup_error(ollama_url, crashed_stderr or _read_ollama_stderr()))
+
+
+def _startup_error(ollama_url, stderr):
+    msg = f"Could not reach Ollama at {ollama_url} after {STARTUP_TIMEOUT}s."
+    if stderr:
+        msg += f" `ollama serve` reported:\n{stderr}"
+    else:
+        msg += (
+            " The server may still be loading the model, or another process "
+            "may be bound to that port. Try again, or start `ollama serve` "
+            "manually to see the error."
+        )
+    return msg
 
 
 def _call_ollama(question_text, model, ollama_url, retry_hint=False):
@@ -123,9 +175,33 @@ def _call_ollama(question_text, model, ollama_url, retry_hint=False):
     try:
         resp = requests.post(f"{ollama_url}/api/generate", json=payload, timeout=REQUEST_TIMEOUT)
         resp.raise_for_status()
+    except requests.Timeout as exc:
+        raise GemmaClientError(
+            f"Ollama timed out after {REQUEST_TIMEOUT}s for model '{model}'. "
+            "The model may still be loading into memory (the first request "
+            "after startup is slowest) -- try again."
+        ) from exc
+    except requests.HTTPError as exc:
+        # Surface Ollama's own error text (e.g. 'model not found'), which is
+        # in the JSON body and otherwise lost behind a bare status code.
+        detail = _http_error_detail(exc)
+        raise GemmaClientError(f"Ollama returned an error: {detail}") from exc
     except requests.RequestException as exc:
         raise GemmaClientError(f"Ollama request failed: {exc}") from exc
     return resp.json().get("response", "")
+
+
+def _http_error_detail(exc):
+    resp = exc.response
+    if resp is None:
+        return str(exc)
+    try:
+        body = resp.json()
+        if isinstance(body, dict) and body.get("error"):
+            return f"{resp.status_code} {body['error']}"
+    except ValueError:
+        pass
+    return f"{resp.status_code} {resp.text[:300]}".strip()
 
 
 def _parse_answer_json(raw):
@@ -138,8 +214,13 @@ def _parse_answer_json(raw):
     return None
 
 
-# Matches a $...$ span; math content must not itself contain a literal $.
-_MATH_RUN_RE = re.compile(r"\$([^$]+)\$")
+# Matches a $...$ math span. The opening `$` must be followed by a character
+# that isn't a digit or whitespace, so currency like "$5", "$ 50", or
+# "costs $5 and $3 more" is NOT misread as a math run -- a real math span
+# starts with a letter, backslash macro, brace, sign, etc. (A bare "$5$"
+# meaning the literal number 5 falls through to the text path, where the RNN
+# draws "5" just fine, so nothing is lost.) Content still may not contain $.
+_MATH_RUN_RE = re.compile(r"\$([^\d\s$][^$]*)\$")
 
 
 def split_runs(answer_text):

@@ -142,10 +142,15 @@ def create_app(session_path, ollama_url=gemma_client.DEFAULT_OLLAMA_URL, model=g
                 raw = gemma_client.generate_answer(q["text"], model=model, ollama_url=ollama_url)
             except gemma_client.GemmaClientError as exc:
                 return jsonify({"ok": False, "error": str(exc)}), 502
-        runs = gemma_client.split_runs(raw)
+        try:
+            runs = gemma_client.split_runs(raw)
+            q["seed"] = q.get("seed", 0)
+            strokes, warning = render_box.render_answer_in_box(runs, q["box"], seed=q["seed"])
+        except Exception as exc:
+            # Rendering the answer into strokes can fail on pathological model
+            # output; return a clean error instead of an opaque 500 stack.
+            return jsonify({"ok": False, "error": f"Could not render the answer: {exc}"}), 500
         q["answer"] = {"raw": raw, "runs": runs}
-        q["seed"] = q.get("seed", 0)
-        strokes, warning = render_box.render_answer_in_box(runs, q["box"], seed=q["seed"])
         q["strokes"] = strokes
         ls.save(session, session_path)
         return jsonify({"ok": True, "answer": q["answer"], "strokes": strokes, "warning": warning})

@@ -28,7 +28,22 @@ BOX_PADDING = 4
 WORD_GAP_FACTOR = 0.35  # gap between tokens on a line, as a fraction of line height
 CHAR_WIDTH_FACTOR = 0.55  # rough avg char width as a fraction of line height; wrap estimate only
 
+# Characters the handwriting RNN can actually draw (its IAM-OnDB alphabet).
+# Anything outside this set -- math operators like + = * /, accented
+# letters, symbols -- has no glyph and would otherwise be silently encoded
+# as the null character, producing noise. Text containing such characters is
+# routed through math_render instead (see _render_line).
+_RNN_CHARS = set(drawing.alphabet)
+
+# Bounded cache: a long-running server would otherwise accumulate one entry
+# per unique math expression forever.
+_MATH_WIDTH_CACHE_MAX = 512
 _math_width_cache = {}
+
+
+def _rnn_can_render(text):
+    """True if every character in `text` is in the RNN's drawable alphabet."""
+    return all(ch in _RNN_CHARS for ch in text)
 
 
 def _tokenize_runs(runs):
@@ -50,14 +65,19 @@ def _estimate_math_width(value, line_height):
     if cached is None:
         _, w, _ = math_render.render_math_strokes(value, font_size_pt=24, jitter=False)
         cached = w
+        if len(_math_width_cache) >= _MATH_WIDTH_CACHE_MAX:
+            # FIFO eviction -- keep the cache from growing without bound.
+            _math_width_cache.pop(next(iter(_math_width_cache)))
         _math_width_cache[value] = cached
     return cached * (line_height / 24.0)
 
 
 def _estimate_token_width(token, line_height):
     kind, value = token
-    if kind == "text":
+    if kind == "text" and _rnn_can_render(value):
         return len(value) * line_height * CHAR_WIDTH_FACTOR
+    # Math tokens, and text the RNN can't draw (rendered via math_render),
+    # are measured the same way so wrapping stays roughly accurate.
     return _estimate_math_width(value, line_height)
 
 
@@ -106,22 +126,28 @@ def _render_line(line_tokens, line_height, bias, style_prime, seed):
     x_cursor = 0.0
     max_y = 0.0
     min_y = 0.0
-    seed_counter = 0
-    for kind, value in groups:
-        if kind == "text":
+    # Seed per group is keyed off its index, not a running counter, so that a
+    # skipped (empty-render) group doesn't shift the seeds of later groups.
+    for gi, (kind, value) in enumerate(groups):
+        if kind == "text" and _rnn_can_render(value):
             offsets = sample_strokes(
                 value, bias=bias, style_prime=style_prime,
-                seed=None if seed is None else seed + seed_counter,
+                seed=None if seed is None else seed + gi,
             )
-            seed_counter += 1
             segments = drawing.strokes_to_path_segments(offsets)
             # Original RNN output is tuned for ~LINE_HEIGHT=48pt rendering
             # (see render.py); rescale to this tier's line height.
             rnn_scale = line_height / 48.0
             group_pts = [np.asarray(seg, dtype=float) * rnn_scale for seg in segments]
         else:
-            math_seed = 0 if seed is None else seed + seed_counter
-            seed_counter += 1
+            # Math runs -- and text the RNN has no glyphs for (e.g. a bare
+            # "12 + 7 = 19" the model didn't wrap in $...$) -- go through the
+            # mathtext path so operators/symbols render instead of becoming
+            # null-character noise.
+            if seed is None:
+                math_seed = int(np.random.randint(0, 2 ** 31 - 1))
+            else:
+                math_seed = seed + gi
             group_strokes, _, _ = math_render.render_math_strokes(
                 value, font_size_pt=line_height * 0.85, jitter=True, seed=math_seed,
             )
@@ -193,6 +219,9 @@ def render_answer_in_box(answer_runs, box, bias=0.75, style_prime=True, seed=Non
         combined_scale = line_scale * extra_scale
         baseline_y = box["y0"] + BOX_PADDING + (i + 1) * line_height * extra_scale - line_height * 0.25 * extra_scale
         for pts in line_strokes:
+            # pts are baseline-relative, y-up (RNN/math convention). baseline_y
+            # is the line's baseline in absolute page space (y-down, PyMuPDF),
+            # so subtracting the y-up offset converts to page coordinates.
             abs_x = box["x0"] + BOX_PADDING + pts[:, 0] * combined_scale
             abs_y = baseline_y - pts[:, 1] * combined_scale
             strokes.append({
