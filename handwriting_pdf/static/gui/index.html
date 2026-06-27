@@ -34,6 +34,7 @@
       <div class="tool-group">
         <button class="tool-btn" data-tool="select" title="Select / move box">Select</button>
         <button class="tool-btn" data-tool="box" title="Draw answer box">Box</button>
+        <button class="tool-btn" data-tool="freeform" title="Draw a box and type your own text into it">Freeform</button>
         <button class="tool-btn" data-tool="pen" title="Pen: draw strokes">Pen</button>
         <button class="tool-btn" data-tool="eraser" title="Eraser: remove parts of strokes">Eraser</button>
       </div>
@@ -48,6 +49,7 @@
       <div class="tool-group">
         <button id="generate-btn">Generate</button>
         <button id="regenerate-btn">Regenerate</button>
+        <button id="edit-text-btn">Edit Text</button>
         <button id="delete-q-btn">Delete</button>
         <button id="restore-q-btn">Restore</button>
       </div>
@@ -58,6 +60,18 @@
     <div id="status-bar"></div>
   </main>
 </div>
+
+<div id="freeform-modal" style="display:none">
+  <div id="freeform-modal-box">
+    <h3>Text</h3>
+    <textarea id="freeform-text" rows="5" placeholder="Type or paste text to render as handwriting. Wrap math in $...$."></textarea>
+    <div class="tool-group">
+      <button id="freeform-render-btn">Render</button>
+      <button id="freeform-cancel-btn">Cancel</button>
+    </div>
+  </div>
+</div>
+
 <script src="/static/gui/app.js"></script>
 </body>
 </html>

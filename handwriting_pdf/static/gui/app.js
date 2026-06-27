@@ -187,7 +187,7 @@ function draw() {
     drawStrokes(q.strokes || [], q.id === state.activeQid ? "#111" : "#444");
   }
 
-  if (state.drag && state.drag.type === "box-draw") drawDragBox(state.drag);
+  if (state.drag && (state.drag.type === "box-draw" || state.drag.type === "freeform-draw")) drawDragBox(state.drag);
   if (state.drag && state.drag.type === "pen") drawLivePoints(state.drag.canvasPts, "#1f4fd6");
   if (state.drag && state.drag.type === "eraser") drawEraserCursor(state.drag);
 }
@@ -298,7 +298,15 @@ function renderQuestionList() {
     li.className = (q.id === state.activeQid ? "active " : "") + (q.deleted ? "deleted" : "");
     const textDiv = document.createElement("div");
     textDiv.className = "q-text";
-    textDiv.textContent = q.text;
+    if (q.source === "manual") {
+      const badge = document.createElement("span");
+      badge.className = "badge-manual";
+      badge.textContent = "Manual";
+      textDiv.appendChild(badge);
+      textDiv.appendChild(document.createTextNode(q.text || "(empty)"));
+    } else {
+      textDiv.textContent = q.text;
+    }
     const metaDiv = document.createElement("div");
     metaDiv.className = "q-meta";
     metaDiv.textContent = `p.${q.box.page + 1} | ${q.answer ? "answered" : "no answer"}`;
@@ -307,6 +315,12 @@ function renderQuestionList() {
     li.addEventListener("click", () => selectQuestion(q.id));
     ul.appendChild(li);
   }
+  updateActionButtons();
+}
+
+function updateActionButtons() {
+  const q = getActiveQuestion();
+  $("edit-text-btn").style.display = q && !q.deleted ? "" : "none";
 }
 
 async function selectQuestion(qid) {
@@ -353,6 +367,11 @@ function onPointerDown(evt) {
     return;
   }
 
+  if (state.tool === "freeform") {
+    state.drag = { type: "freeform-draw", x0: px, y0: py, x1: px, y1: py };
+    return;
+  }
+
   if (state.tool === "pen" && q) {
     state.drag = { type: "pen", qid: q.id, pdfPts: [[px, py]], canvasPts: [[evt.offsetX, evt.offsetY]] };
     return;
@@ -369,7 +388,7 @@ function onPointerMove(evt) {
   const [px, py] = eventToPdf(evt);
   const d = state.drag;
 
-  if (d.type === "box-draw") {
+  if (d.type === "box-draw" || d.type === "freeform-draw") {
     d.x1 = px; d.y1 = py;
     draw();
   } else if (d.type === "move") {
@@ -410,6 +429,25 @@ async function onPointerUp(evt) {
     q.box.x0 = Math.min(d.x0, d.x1); q.box.x1 = Math.max(d.x0, d.x1);
     q.box.y0 = Math.min(d.y0, d.y1); q.box.y1 = Math.max(d.y0, d.y1);
     await saveBox(q);
+  } else if (d.type === "freeform-draw") {
+    const x0 = Math.min(d.x0, d.x1), x1 = Math.max(d.x0, d.x1);
+    const y0 = Math.min(d.y0, d.y1), y1 = Math.max(d.y0, d.y1);
+    if (x1 - x0 < 4 || y1 - y0 < 4) {
+      setStatus("Box too small -- drag out a larger area for the freeform box.");
+    } else {
+      try {
+        const data = await api("POST", "/api/session/questions/freeform", {
+          page: state.pageNum, x0, y0, x1, y1, text: "",
+        });
+        state.session.questions.push(data.question);
+        state.activeQid = data.question.id;
+        ensureHistory(data.question.id);
+        renderQuestionList();
+        openFreeformModal(data.question.id);
+      } catch (e) {
+        setStatus(e.message);
+      }
+    }
   } else if (d.type === "move" || d.type === "resize") {
     const q = state.session.questions.find(qq => qq.id === d.qid);
     normalizeBox(q.box);
@@ -468,6 +506,63 @@ function eraseStrokes(strokes, eraserPath, radius) {
   }
   return result;
 }
+
+// ---------- freeform text modal ----------
+// Shared by both manual (freeform) entries and edits to an extracted
+// question's prompt text -- the two cases differ only in what Render does:
+// manual entries render immediately (no Gemma); extracted questions just
+// save the edited text and leave generation to the existing Generate button.
+
+function openFreeformModal(qid) {
+  const q = state.session.questions.find(qq => qq.id === qid);
+  $("freeform-text").value = q.text || "";
+  $("freeform-render-btn").textContent = q.source === "manual" ? "Render" : "Save";
+  $("freeform-modal").style.display = "flex";
+  $("freeform-modal").dataset.qid = qid;
+  $("freeform-text").focus();
+}
+
+function closeFreeformModal() {
+  $("freeform-modal").style.display = "none";
+  delete $("freeform-modal").dataset.qid;
+}
+
+$("freeform-cancel-btn").addEventListener("click", closeFreeformModal);
+
+$("freeform-render-btn").addEventListener("click", async () => {
+  const qid = $("freeform-modal").dataset.qid;
+  const q = state.session.questions.find(qq => qq.id === qid);
+  if (!q) { closeFreeformModal(); return; }
+  const text = $("freeform-text").value;
+  if (q.source === "manual" && !text.trim()) {
+    setStatus("Enter some text first.");
+    return;
+  }
+  q.text = text;
+  try {
+    await api("POST", `/api/session/questions/${qid}/text`, { text });
+    if (q.source === "manual") {
+      setStatus("Rendering...");
+      const data = await api("POST", `/api/session/questions/${qid}/generate`);
+      q.answer = data.answer;
+      q.strokes = data.strokes;
+      pushHistory(qid, q.strokes);
+      setStatus(data.warning || "Rendered.");
+    } else {
+      setStatus("Text updated. Click Generate to get a new answer.");
+    }
+  } catch (e) {
+    setStatus(e.message);
+  }
+  closeFreeformModal();
+  renderQuestionList();
+  draw();
+});
+
+$("edit-text-btn").addEventListener("click", () => {
+  const q = getActiveQuestion();
+  if (q) openFreeformModal(q.id);
+});
 
 // ---------- action buttons ----------
 
@@ -547,6 +642,24 @@ $("upload-btn").addEventListener("click", () => {
   const file = $("pdf-input").files[0];
   if (!file) { $("upload-status").textContent = "Choose a PDF first."; return; }
   uploadPdf(file);
+});
+
+const dropZone = $("upload-box");
+["dragenter", "dragover"].forEach(evt =>
+  dropZone.addEventListener(evt, e => {
+    e.preventDefault();
+    dropZone.classList.add("drag-over");
+  })
+);
+["dragleave", "drop"].forEach(evt =>
+  dropZone.addEventListener(evt, e => {
+    e.preventDefault();
+    dropZone.classList.remove("drag-over");
+  })
+);
+dropZone.addEventListener("drop", e => {
+  const file = e.dataTransfer.files[0];
+  if (file) uploadPdf(file);
 });
 
 $("undo-btn").addEventListener("click", undo);

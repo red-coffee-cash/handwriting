@@ -95,6 +95,27 @@ def create_app(session_path, ollama_url=gemma_client.DEFAULT_OLLAMA_URL, model=g
         rect = _doc()[page_num].rect
         return jsonify({"width": rect.width, "height": rect.height})
 
+    @app.post("/api/session/questions/freeform")
+    def create_freeform_question():
+        """Create a new user-drawn, user-texted box, not tied to any
+        extracted question -- rendered straight from the typed text with no
+        Gemma call (see generate_answer's source == "manual" branch)."""
+        session = ls.load(session_path)
+        body = request.get_json()
+        box = {"x0": body["x0"], "y0": body["y0"], "x1": body["x1"], "y1": body["y1"]}
+        q = ls.new_freeform_question(session, body["page"], box, text=body.get("text", ""))
+        ls.save(session, session_path)
+        return jsonify({"ok": True, "question": q})
+
+    @app.post("/api/session/questions/<qid>/text")
+    def update_question_text(qid):
+        session = ls.load(session_path)
+        q = ls.get_question(session, qid)
+        body = request.get_json()
+        q["text"] = body["text"]
+        ls.save(session, session_path)
+        return jsonify({"ok": True})
+
     @app.post("/api/session/questions/<qid>/box")
     def update_box(qid):
         session = ls.load(session_path)
@@ -112,10 +133,15 @@ def create_app(session_path, ollama_url=gemma_client.DEFAULT_OLLAMA_URL, model=g
     def generate_answer(qid):
         session = ls.load(session_path)
         q = ls.get_question(session, qid)
-        try:
-            raw = gemma_client.generate_answer(q["text"], model=model, ollama_url=ollama_url)
-        except gemma_client.GemmaClientError as exc:
-            return jsonify({"ok": False, "error": str(exc)}), 502
+        if q.get("source") == "manual":
+            raw = (q.get("text") or "").strip()
+            if not raw:
+                return jsonify({"ok": False, "error": "No text entered."}), 400
+        else:
+            try:
+                raw = gemma_client.generate_answer(q["text"], model=model, ollama_url=ollama_url)
+            except gemma_client.GemmaClientError as exc:
+                return jsonify({"ok": False, "error": str(exc)}), 502
         runs = gemma_client.split_runs(raw)
         q["answer"] = {"raw": raw, "runs": runs}
         q["seed"] = q.get("seed", 0)
