@@ -315,6 +315,7 @@ function renderQuestionList() {
     li.addEventListener("click", () => selectQuestion(q.id));
     ul.appendChild(li);
   }
+  $("question-list-empty").style.display = state.session.questions.length ? "none" : "flex";
   updateActionButtons();
 }
 
@@ -516,7 +517,7 @@ function eraseStrokes(strokes, eraserPath, radius) {
 function openFreeformModal(qid) {
   const q = state.session.questions.find(qq => qq.id === qid);
   $("freeform-text").value = q.text || "";
-  $("freeform-render-btn").textContent = q.source === "manual" ? "Render" : "Save";
+  $("freeform-render-btn").querySelector(".btn-label").textContent = q.source === "manual" ? "Render" : "Save";
   $("freeform-modal").style.display = "flex";
   $("freeform-modal").dataset.qid = qid;
   $("freeform-text").focus();

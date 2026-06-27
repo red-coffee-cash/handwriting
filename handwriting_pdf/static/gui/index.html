@@ -9,49 +9,110 @@
 <div id="upload-screen">
   <div id="upload-box">
     <h1>Worksheet Layout Editor</h1>
-    <p>Upload a worksheet PDF to detect its questions and start placing answers.</p>
-    <input type="file" id="pdf-input" accept="application/pdf">
-    <button id="upload-btn">Upload &amp; Extract Questions</button>
+    <p class="subtitle">Upload a worksheet PDF to detect its questions and start placing handwritten answers.</p>
+    <div id="drop-zone">
+      <svg class="drop-icon" viewBox="0 0 24 24"><path d="M12 16V4m0 0L7 9m5-5 5 5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+      <p>Drag &amp; drop a PDF here, or choose a file below.</p>
+      <input type="file" id="pdf-input" accept="application/pdf">
+    </div>
+    <button id="upload-btn">
+      <svg class="icon" viewBox="0 0 24 24"><path d="M14 3v4a1 1 0 0 0 1 1h4"/><path d="M17 21H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l5 5v11a2 2 0 0 1-2 2z"/><path d="M9 13h6m-6 4h6"/></svg>
+      <span class="btn-label">Upload &amp; Extract Questions</span>
+    </button>
     <div id="upload-status"></div>
   </div>
 </div>
 
 <div id="app" style="display:none">
   <aside id="sidebar">
+    <div id="brand">
+      <svg class="brand-mark" viewBox="0 0 24 24"><path d="M3 17.5V21h3.5L17 10.5 13.5 7 3 17.5z"/><path d="M14.5 6 18 9.5l2-2a1.8 1.8 0 0 0 0-2.5l-1-1a1.8 1.8 0 0 0-2.5 0l-2 2z"/></svg>
+      <span class="brand-text">Worksheet Editor<span class="brand-sub">handwritten answers</span></span>
+    </div>
     <div id="page-nav">
-      <button id="prev-page">&larr;</button>
+      <button id="prev-page" title="Previous page">
+        <svg class="icon" viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></svg>
+      </button>
       <span id="page-label">Page 1 / 1</span>
-      <button id="next-page">&rarr;</button>
+      <button id="next-page" title="Next page">
+        <svg class="icon" viewBox="0 0 24 24"><path d="M9 18l6-6-6-6"/></svg>
+      </button>
     </div>
     <ul id="question-list"></ul>
-    <button id="confirm-btn">Finish: Render &amp; Download PDF</button>
-    <button id="new-worksheet-btn">Start New Worksheet</button>
+    <div id="question-list-empty" style="display:none">
+      <svg viewBox="0 0 24 24"><path d="M14 3v4a1 1 0 0 0 1 1h4"/><path d="M17 21H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l5 5v11a2 2 0 0 1-2 2z"/></svg>
+      <p>No questions yet. Upload a worksheet, or use the Freeform tool to draw your own answer box.</p>
+    </div>
+    <button id="confirm-btn">
+      <svg class="icon" viewBox="0 0 24 24"><path d="M12 16V4m0 12-4-4m4 4 4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+      <span class="btn-label">Finish: Render &amp; Download PDF</span>
+    </button>
+    <button id="new-worksheet-btn">
+      <svg class="icon" viewBox="0 0 24 24"><path d="M14 3v4a1 1 0 0 0 1 1h4"/><path d="M17 21H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l5 5v11a2 2 0 0 1-2 2z"/><path d="M12 11v6m-3-3h6"/></svg>
+      <span class="btn-label">Start New Worksheet</span>
+    </button>
     <div id="confirm-status"></div>
   </aside>
 
   <main id="stage-wrap">
     <div id="toolbar">
       <div class="tool-group">
-        <button class="tool-btn" data-tool="select" title="Select / move box">Select</button>
-        <button class="tool-btn" data-tool="box" title="Draw answer box">Box</button>
-        <button class="tool-btn" data-tool="freeform" title="Draw a box and type your own text into it">Freeform</button>
-        <button class="tool-btn" data-tool="pen" title="Pen: draw strokes">Pen</button>
-        <button class="tool-btn" data-tool="eraser" title="Eraser: remove parts of strokes">Eraser</button>
+        <button class="tool-btn" data-tool="select" title="Select / move box">
+          <svg class="icon" viewBox="0 0 24 24"><path d="M5 3l14 7-6 2-2 6-6-15z"/></svg>
+          <span class="btn-label">Select</span>
+        </button>
+        <button class="tool-btn" data-tool="box" title="Draw answer box">
+          <svg class="icon" viewBox="0 0 24 24"><rect x="4" y="6" width="16" height="12" rx="1.5"/></svg>
+          <span class="btn-label">Box</span>
+        </button>
+        <button class="tool-btn" data-tool="freeform" title="Draw a box and type your own text into it">
+          <svg class="icon" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="1.5" stroke-dasharray="3 2.5"/><path d="M8 10h8m-8 4h5"/></svg>
+          <span class="btn-label">Freeform</span>
+        </button>
+        <button class="tool-btn" data-tool="pen" title="Pen: draw strokes">
+          <svg class="icon" viewBox="0 0 24 24"><path d="M12 19l7-7-4-4-7 7-1 5 5-1z"/><path d="M15 8l1-1a1.7 1.7 0 0 0 0-2.4l-.6-.6a1.7 1.7 0 0 0-2.4 0l-1 1"/></svg>
+          <span class="btn-label">Pen</span>
+        </button>
+        <button class="tool-btn" data-tool="eraser" title="Eraser: remove parts of strokes">
+          <svg class="icon" viewBox="0 0 24 24"><path d="M4 15l6.5-6.5a2 2 0 0 1 2.8 0l4.2 4.2a2 2 0 0 1 0 2.8L14 20H8l-4-4z"/><path d="M8 20h12"/></svg>
+          <span class="btn-label">Eraser</span>
+        </button>
       </div>
       <div class="tool-group">
         <label>Pen width <input id="pen-width" type="range" min="0.6" max="4" step="0.2" value="1.4"></label>
         <label>Eraser size <input id="eraser-size" type="range" min="4" max="40" step="1" value="14"></label>
       </div>
       <div class="tool-group">
-        <button id="undo-btn" title="Undo">&#8634; Undo</button>
-        <button id="redo-btn" title="Redo">&#8635; Redo</button>
+        <button id="undo-btn" title="Undo">
+          <svg class="icon" viewBox="0 0 24 24"><path d="M9 14L4 9l5-5"/><path d="M4 9h11a5 5 0 0 1 0 10h-3"/></svg>
+          <span class="btn-label">Undo</span>
+        </button>
+        <button id="redo-btn" title="Redo">
+          <svg class="icon" viewBox="0 0 24 24"><path d="M15 14l5-5-5-5"/><path d="M20 9H9a5 5 0 0 0 0 10h3"/></svg>
+          <span class="btn-label">Redo</span>
+        </button>
       </div>
       <div class="tool-group">
-        <button id="generate-btn">Generate</button>
-        <button id="regenerate-btn">Regenerate</button>
-        <button id="edit-text-btn">Edit Text</button>
-        <button id="delete-q-btn">Delete</button>
-        <button id="restore-q-btn">Restore</button>
+        <button id="generate-btn" title="Generate an answer with the model">
+          <svg class="icon" viewBox="0 0 24 24"><path d="M12 3l1.8 4.2L18 9l-4.2 1.8L12 15l-1.8-4.2L6 9l4.2-1.8L12 3z"/><path d="M18 14l.9 2.1L21 17l-2.1.9L18 20l-.9-2.1L15 17l2.1-.9L18 14z"/></svg>
+          <span class="btn-label">Generate</span>
+        </button>
+        <button id="regenerate-btn" title="Regenerate strokes">
+          <svg class="icon" viewBox="0 0 24 24"><path d="M20 11a8 8 0 0 0-14-4.9L4 8"/><path d="M4 4v4h4"/><path d="M4 13a8 8 0 0 0 14 4.9L20 16"/><path d="M20 20v-4h-4"/></svg>
+          <span class="btn-label">Regenerate</span>
+        </button>
+        <button id="edit-text-btn" title="Edit the question / answer text">
+          <svg class="icon" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2 2 0 0 1 2.8 2.8L7 19l-4 1 1-4 12.5-12.5z"/></svg>
+          <span class="btn-label">Edit Text</span>
+        </button>
+        <button id="delete-q-btn" title="Delete question">
+          <svg class="icon" viewBox="0 0 24 24"><path d="M4 7h16"/><path d="M10 11v6m4-6v6"/><path d="M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13"/><path d="M9 7V4h6v3"/></svg>
+          <span class="btn-label">Delete</span>
+        </button>
+        <button id="restore-q-btn" title="Restore question">
+          <svg class="icon" viewBox="0 0 24 24"><path d="M3 7v6h6"/><path d="M3 13a9 9 0 1 0 2.6-6.4L3 9"/></svg>
+          <span class="btn-label">Restore</span>
+        </button>
       </div>
     </div>
     <div id="canvas-scroll">
@@ -66,8 +127,11 @@
     <h3>Text</h3>
     <textarea id="freeform-text" rows="5" placeholder="Type or paste text to render as handwriting. Wrap math in $...$."></textarea>
     <div class="tool-group">
-      <button id="freeform-render-btn">Render</button>
       <button id="freeform-cancel-btn">Cancel</button>
+      <button id="freeform-render-btn">
+        <svg class="icon" viewBox="0 0 24 24"><path d="M12 19l7-7-4-4-7 7-1 5 5-1z"/><path d="M15 8l1-1a1.7 1.7 0 0 0 0-2.4l-.6-.6a1.7 1.7 0 0 0-2.4 0l-1 1"/></svg>
+        <span class="btn-label">Render</span>
+      </button>
     </div>
   </div>
 </div>
