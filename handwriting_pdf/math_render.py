@@ -63,14 +63,9 @@ def _ensure_font_registered():
     _font_registered = True
 
 
-def _rasterize(snippet, size_pt, dpi=RASTER_DPI):
-    """Render a mathtext snippet to a binary numpy mask (True = ink) and
-    return (mask, px_per_pt) where px_per_pt converts mask pixel distances
-    to PDF points at the given font size."""
-    fig = plt.figure(figsize=(8, 2), dpi=dpi)
-    fig.patch.set_alpha(0)
-    t = fig.text(0.02, 0.5, snippet, fontsize=size_pt, va="center", ha="left")
-    fig.canvas.draw()
+def _rasterize_to_mask(fig, t, dpi):
+    """Tighten `fig` around text artist `t`, render, and return (mask,
+    px_per_pt). Shared tail of _rasterize and _rasterize_plain."""
     bbox = t.get_window_extent(fig.canvas.get_renderer())
     pad = 6
     fig.set_size_inches((bbox.width + 2 * pad) / fig.dpi, (bbox.height + 2 * pad) / fig.dpi)
@@ -84,9 +79,43 @@ def _rasterize(snippet, size_pt, dpi=RASTER_DPI):
     plt.close(fig)
     alpha = img[:, :, 3].astype(float)
     mask = alpha > 64
-    # px_per_pt: pixels per PDF point at this rasterization's font size.
     px_per_pt = dpi / 72.0
     return mask, px_per_pt
+
+
+def _rasterize_plain(snippet, size_pt, dpi=RASTER_DPI):
+    """Fallback for malformed mathtext: render the literal characters in the
+    Caveat handwriting font with math parsing disabled, so unparseable LaTeX
+    still produces readable strokes instead of an exception."""
+    literal = snippet.strip()
+    if literal.startswith("$") and literal.endswith("$"):
+        literal = literal[1:-1]
+    fig = plt.figure(figsize=(8, 2), dpi=dpi)
+    fig.patch.set_alpha(0)
+    fp = fm.FontProperties(fname=FONT_PATH)
+    t = fig.text(0.02, 0.5, literal, fontsize=size_pt, va="center", ha="left",
+                 fontproperties=fp, parse_math=False)
+    fig.canvas.draw()
+    return _rasterize_to_mask(fig, t, dpi)
+
+
+def _rasterize(snippet, size_pt, dpi=RASTER_DPI):
+    """Render a mathtext snippet to a binary numpy mask (True = ink) and
+    return (mask, px_per_pt) where px_per_pt converts mask pixel distances
+    to PDF points at the given font size."""
+    fig = plt.figure(figsize=(8, 2), dpi=dpi)
+    fig.patch.set_alpha(0)
+    t = fig.text(0.02, 0.5, snippet, fontsize=size_pt, va="center", ha="left")
+    try:
+        fig.canvas.draw()
+    except Exception:
+        # Invalid mathtext/LaTeX from the model (unbalanced braces,
+        # unsupported macros, ...) raises during layout. Re-render the raw
+        # content as plain handwriting-font text so it stays legible instead
+        # of crashing the whole generate request.
+        plt.close(fig)
+        return _rasterize_plain(snippet, size_pt, dpi=dpi)
+    return _rasterize_to_mask(fig, t, dpi)
 
 
 def _skeleton_to_polylines(mask):

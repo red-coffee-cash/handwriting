@@ -33,7 +33,7 @@ async function api(method, url, body) {
   return data;
 }
 
-function setStatus(msg) { $("status-bar").textContent = msg || ""; }
+function setStatus(msg) { $("status-msg").textContent = msg || ""; }
 
 // ---------- session / page loading ----------
 
@@ -188,8 +188,13 @@ function draw() {
   }
 
   if (state.drag && (state.drag.type === "box-draw" || state.drag.type === "freeform-draw")) drawDragBox(state.drag);
-  if (state.drag && state.drag.type === "pen") drawLivePoints(state.drag.canvasPts, "#1f4fd6");
+  if (state.drag && state.drag.type === "pen") drawLivePoints(state.drag.canvasPts, "#111");
   if (state.drag && state.drag.type === "eraser") drawEraserCursor(state.drag);
+
+  if (state.tool === "transform") {
+    const aq = getActiveQuestion();
+    if (aq && !aq.deleted && aq.strokes && aq.strokes.length) drawTransformBox(aq);
+  }
 }
 
 function drawBox(q) {
@@ -202,7 +207,9 @@ function drawBox(q) {
   ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
   ctx.restore();
 
-  if (q.id === state.activeQid) {
+  // Suppress the box's own resize handles while the transform tool is active,
+  // so they don't overlap the green stroke-transform handles.
+  if (q.id === state.activeQid && state.tool !== "transform") {
     for (const [hx, hy] of boxHandles(q.box)) {
       const [cx, cy] = pdfToCanvas(hx, hy);
       ctx.fillStyle = "#3a6df0";
@@ -236,11 +243,93 @@ function pointInBox(box, x, y) {
   return x >= box.x0 && x <= box.x1 && y >= box.y0 && y <= box.y1;
 }
 
+// ---------- resize (transform) tool helpers ----------
+// The transform tool moves/scales a question's already-rendered strokes
+// directly, with no regenerate. It works on the bounding box of the strokes
+// (not the answer box, which is left untouched).
+
+function strokesBBox(strokes) {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const s of strokes || []) {
+    for (const [x, y] of s.points || []) {
+      if (x < x0) x0 = x;
+      if (y < y0) y0 = y;
+      if (x > x1) x1 = x;
+      if (y > y1) y1 = y;
+    }
+  }
+  if (!isFinite(x0)) return null;
+  return { x0, y0, x1, y1 };
+}
+
+// For a grabbed handle, return the moving handle point, the fixed anchor
+// (opposite corner/edge), and which axis an edge-handle drag follows.
+function handleAndAnchor(handle, b) {
+  const mx = (b.x0 + b.x1) / 2, my = (b.y0 + b.y1) / 2;
+  switch (handle) {
+    case "nw": return { h: [b.x0, b.y0], a: [b.x1, b.y1], axis: "both" };
+    case "ne": return { h: [b.x1, b.y0], a: [b.x0, b.y1], axis: "both" };
+    case "sw": return { h: [b.x0, b.y1], a: [b.x1, b.y0], axis: "both" };
+    case "se": return { h: [b.x1, b.y1], a: [b.x0, b.y0], axis: "both" };
+    case "n": return { h: [mx, b.y0], a: [mx, b.y1], axis: "y" };
+    case "s": return { h: [mx, b.y1], a: [mx, b.y0], axis: "y" };
+    case "w": return { h: [b.x0, my], a: [b.x1, my], axis: "x" };
+    case "e": return { h: [b.x1, my], a: [b.x0, my], axis: "x" };
+  }
+}
+
+// Single uniform scale factor (aspect-preserving). Edge handles scale along
+// their axis; corner handles use the anchor->pointer distance ratio.
+function scaleFactor(info, px, py) {
+  const [hx, hy] = info.h, [ax, ay] = info.a;
+  let s;
+  if (info.axis === "x") {
+    s = (hx - ax) === 0 ? 1 : (px - ax) / (hx - ax);
+  } else if (info.axis === "y") {
+    s = (hy - ay) === 0 ? 1 : (py - ay) / (hy - ay);
+  } else {
+    const dh = Math.hypot(hx - ax, hy - ay);
+    s = dh === 0 ? 1 : Math.hypot(px - ax, py - ay) / dh;
+  }
+  return Math.max(0.1, s);  // clamp to avoid collapsing or flipping
+}
+
+function translateStrokes(strokes, dx, dy) {
+  return strokes.map(s => ({ ...s, points: s.points.map(([x, y]) => [x + dx, y + dy]) }));
+}
+
+function scaleStrokesAbout(strokes, anchor, s) {
+  const [ax, ay] = anchor;
+  return strokes.map(st => ({
+    ...st,
+    points: st.points.map(([x, y]) => [ax + (x - ax) * s, ay + (y - ay) * s]),
+  }));
+}
+
+function drawTransformBox(q) {
+  const b = strokesBBox(q.strokes);
+  if (!b) return;
+  const [x0, y0] = pdfToCanvas(b.x0, b.y0);
+  const [x1, y1] = pdfToCanvas(b.x1, b.y1);
+  ctx.save();
+  ctx.strokeStyle = "#1f8a3d";
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash([5, 3]);
+  ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
+  ctx.setLineDash([]);
+  for (const [hx, hy] of boxHandles(b)) {
+    const [cx, cy] = pdfToCanvas(hx, hy);
+    ctx.fillStyle = "#1f8a3d";
+    ctx.fillRect(cx - 4, cy - 4, 8, 8);
+  }
+  ctx.restore();
+}
+
 function drawStrokes(strokes, color) {
   for (const s of strokes) {
     if (!s.points || s.points.length < 2) continue;
     ctx.beginPath();
-    ctx.strokeStyle = s.source === "user" ? "#1f4fd6" : color;
+    ctx.strokeStyle = s.source === "user" ? "#111" : color;
     ctx.lineWidth = Math.max(1, (s.width_pt || 1.4) * state.scale);
     ctx.lineJoin = "round";
     ctx.lineCap = "round";
@@ -338,9 +427,28 @@ async function selectQuestion(qid) {
 
 // ---------- tool handling ----------
 
+const TOOL_INFO = {
+  select: { name: "Select", hint: "move or resize a question's answer box", cursor: "default" },
+  box: { name: "Box", hint: "drag to draw an answer box", cursor: "crosshair" },
+  transform: { name: "Resize", hint: "drag inside to move, or a handle to scale the handwriting", cursor: "move" },
+  freeform: { name: "Freeform", hint: "drag a box, then type your own text", cursor: "crosshair" },
+  pen: { name: "Pen", hint: "draw freehand strokes", cursor: "crosshair" },
+  eraser: { name: "Eraser", hint: "drag over strokes to erase parts of them", cursor: "crosshair" },
+};
+
 function setTool(tool) {
   state.tool = tool;
   document.querySelectorAll(".tool-btn").forEach(b => b.classList.toggle("active", b.dataset.tool === tool));
+  const info = TOOL_INFO[tool] || { name: tool, hint: "", cursor: "default" };
+  const ind = $("tool-indicator");
+  ind.textContent = info.name;
+  ind.title = info.hint;
+  $("status-msg").textContent = info.hint ? `— ${info.hint}` : "";
+  canvas.style.cursor = info.cursor;
+  // Redraw so tool-specific overlays update immediately (e.g. the transform
+  // tool's stroke handles appear and the box handles hide) without waiting
+  // for the next pointer event.
+  if (state.session) draw();
 }
 
 canvas.addEventListener("pointerdown", onPointerDown);
@@ -360,6 +468,21 @@ function onPointerDown(evt) {
     if (pointInBox(q.box, px, py)) {
       state.drag = { type: "move", qid: q.id, orig: { ...q.box }, start: [px, py] };
       return;
+    }
+  }
+
+  if (state.tool === "transform" && q && q.strokes && q.strokes.length) {
+    const b = strokesBBox(q.strokes);
+    if (b) {
+      const handle = hitHandle(b, px, py);
+      if (handle) {
+        state.drag = { type: "strokes-scale", qid: q.id, info: handleAndAnchor(handle, b), orig: cloneStrokes(q.strokes) };
+        return;
+      }
+      if (pointInBox(b, px, py)) {
+        state.drag = { type: "strokes-move", qid: q.id, start: [px, py], orig: cloneStrokes(q.strokes) };
+        return;
+      }
     }
   }
 
@@ -401,6 +524,14 @@ function onPointerMove(evt) {
   } else if (d.type === "resize") {
     const q = state.session.questions.find(qq => qq.id === d.qid);
     applyResize(q.box, d.handle, px, py);
+    draw();
+  } else if (d.type === "strokes-move") {
+    const q = state.session.questions.find(qq => qq.id === d.qid);
+    q.strokes = translateStrokes(d.orig, px - d.start[0], py - d.start[1]);
+    draw();
+  } else if (d.type === "strokes-scale") {
+    const q = state.session.questions.find(qq => qq.id === d.qid);
+    q.strokes = scaleStrokesAbout(d.orig, d.info.a, scaleFactor(d.info, px, py));
     draw();
   } else if (d.type === "pen") {
     d.pdfPts.push([px, py]);
@@ -453,6 +584,10 @@ async function onPointerUp(evt) {
     const q = state.session.questions.find(qq => qq.id === d.qid);
     normalizeBox(q.box);
     await saveBox(q);
+  } else if (d.type === "strokes-move" || d.type === "strokes-scale") {
+    const q = state.session.questions.find(qq => qq.id === d.qid);
+    await commitStrokes(d.qid, q.strokes, true);
+    setStatus(d.type === "strokes-scale" ? "Resized text." : "Moved text.");
   } else if (d.type === "pen") {
     if (d.pdfPts.length >= 2) {
       const q = state.session.questions.find(qq => qq.id === d.qid);
