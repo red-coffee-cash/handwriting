@@ -25,6 +25,7 @@ from sample import sample_strokes
 
 LINE_HEIGHT_TIERS = [28, 22, 18, 14]
 BOX_PADDING = 4
+LINE_LEADING = 2.0  # minimum ink clearance (pt) enforced between adjacent lines
 WORD_GAP_FACTOR = 0.35  # gap between tokens on a line, as a fraction of line height
 CHAR_WIDTH_FACTOR = 0.55  # rough avg char width as a fraction of line height; wrap estimate only
 
@@ -47,14 +48,17 @@ def _rnn_can_render(text):
 
 
 def _tokenize_runs(runs):
-    """Flatten text/math runs into a sequence of ("text", word) / ("math",
-    value) tokens, splitting text runs on whitespace so wrapping can break
-    between words while math runs stay atomic."""
+    """Flatten text/math/break runs into a sequence of ("text", word) /
+    ("math", value) / ("break", None) tokens, splitting text runs on
+    whitespace so wrapping can break between words while math runs stay
+    atomic. Break tokens force a new line (multi-step derivations)."""
     tokens = []
     for run in runs:
         if run["kind"] == "text":
             for word in run["value"].split():
                 tokens.append(("text", word))
+        elif run["kind"] == "break":
+            tokens.append(("break", None))
         else:
             tokens.append(("math", run["value"]))
     return tokens
@@ -85,6 +89,11 @@ def _wrap_tokens(tokens, line_height, usable_width):
     lines, current, current_width = [], [], 0.0
     gap = line_height * WORD_GAP_FACTOR
     for token in tokens:
+        if token[0] == "break":
+            if current:
+                lines.append(current)
+                current, current_width = [], 0.0
+            continue
         w = _estimate_token_width(token, line_height)
         added = w + (gap if current else 0.0)
         if current and current_width + added > usable_width:
@@ -121,9 +130,10 @@ def _group_line_tokens(line_tokens):
 
 
 def _render_line(line_tokens, line_height, bias, style_prime, seed):
-    """Render one wrapped line. Returns (strokes, width, height) with
-    strokes positioned along a shared baseline at y=0, y-up, x starting
-    at 0."""
+    """Render one wrapped line. Returns (strokes, width, min_y, max_y)
+    with strokes positioned along a shared baseline at y=0, y-up, x
+    starting at 0; min_y/max_y are the line's ink extent around that
+    baseline (descent below, ascent above) for vertical layout."""
     groups = _group_line_tokens(line_tokens)
     gap = line_height * WORD_GAP_FACTOR
     strokes = []
@@ -185,8 +195,7 @@ def _render_line(line_tokens, line_height, bias, style_prime, seed):
         max_y = max(max_y, group_max_y)
 
     width = max(0.0, x_cursor - gap) if groups else 0.0
-    height = max_y - min_y
-    return strokes, width, height
+    return strokes, width, min_y, max_y
 
 
 def render_answer_in_box(answer_runs, box, bias=0.75, style_prime=True, seed=None):
@@ -213,12 +222,27 @@ def render_answer_in_box(answer_runs, box, bias=0.75, style_prime=True, seed=Non
                          seed=None if seed is None else seed + 1000 * i)
             for i, line in enumerate(lines)
         ]
-        total_height = line_height * len(rendered_lines)
+        # Baseline positions from actual ink extents: tall math (nested
+        # fractions, big sums) can exceed the nominal line height, so each
+        # advance is at least line_height but grows to keep the previous
+        # line's descenders clear of this line's ascenders.
+        baselines = []
+        prev_descent = None
+        y = 0.0
+        for (_ls, _lw, line_min_y, line_max_y) in rendered_lines:
+            ascent = max(line_max_y, 0.0)
+            if prev_descent is None:
+                y = max(0.75 * line_height, ascent + 1.0)
+            else:
+                y += max(line_height, prev_descent + ascent + LINE_LEADING)
+            baselines.append(y)
+            prev_descent = max(-line_min_y, 0.0)
+        total_height = (baselines[-1] + prev_descent) if baselines else 0.0
         if total_height <= usable_height or tier_index == len(LINE_HEIGHT_TIERS) - 1:
-            chosen = (line_height, rendered_lines, total_height)
+            chosen = (line_height, rendered_lines, baselines, total_height)
             break
 
-    line_height, rendered_lines, total_height = chosen
+    line_height, rendered_lines, baselines, total_height = chosen
     warning = None
     extra_scale = 1.0
     if total_height > usable_height:
@@ -229,10 +253,10 @@ def render_answer_in_box(answer_runs, box, bias=0.75, style_prime=True, seed=Non
         )
 
     strokes = []
-    for i, (line_strokes, line_width, _line_h) in enumerate(rendered_lines):
+    for i, (line_strokes, line_width, _line_min_y, _line_max_y) in enumerate(rendered_lines):
         line_scale = min(1.0, usable_width / line_width) if line_width > 0 else 1.0
         combined_scale = line_scale * extra_scale
-        baseline_y = box["y0"] + BOX_PADDING + (i + 1) * line_height * extra_scale - line_height * 0.25 * extra_scale
+        baseline_y = box["y0"] + BOX_PADDING + baselines[i] * extra_scale
         for pts in line_strokes:
             # pts are baseline-relative, y-up (RNN/math convention). baseline_y
             # is the line's baseline in absolute page space (y-down, PyMuPDF),

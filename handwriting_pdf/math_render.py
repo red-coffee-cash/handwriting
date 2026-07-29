@@ -29,6 +29,7 @@ shape as drawing.strokes_to_path_segments, so callers can draw both with
 the same code path.
 """
 import os
+import re
 
 import numpy as np
 import matplotlib
@@ -116,7 +117,7 @@ def _rasterize_plain(snippet, size_pt, dpi=RASTER_DPI):
     Caveat handwriting font with math parsing disabled, so unparseable LaTeX
     still produces readable strokes instead of an exception."""
     literal = snippet.strip()
-    if literal.startswith("$") and literal.endswith("$"):
+    if len(literal) >= 2 and literal.startswith("$") and literal.endswith("$"):
         literal = literal[1:-1]
     fig = plt.figure(figsize=(8, 2), dpi=dpi)
     fig.patch.set_alpha(0)
@@ -262,6 +263,232 @@ def _polylines_to_points(polylines, mask_height_px, px_per_pt, baseline_from_bot
     return out
 
 
+# --- LaTeX -> mathtext normalization -------------------------------------
+# matplotlib's mathtext supports a subset of LaTeX; these are the common
+# macros models emit that it rejects, mapped to supported spellings.
+# Patterns use \b so e.g. \le never matches inside \left or \leq.
+_MACRO_FIXUPS = [
+    (re.compile(r"\\le\b"), r"\\leq"),
+    (re.compile(r"\\ge\b"), r"\\geq"),
+    (re.compile(r"\\ne\b"), r"\\neq"),
+    (re.compile(r"\\iff\b"), r"\\Leftrightarrow"),
+    (re.compile(r"\\implies\b"), r"\\Rightarrow"),
+    (re.compile(r"\\impliedby\b"), r"\\Leftarrow"),
+    (re.compile(r"\\tfrac\b"), r"\\frac"),
+    (re.compile(r"\\displaystyle\b"), ""),
+    (re.compile(r"\\pmod\s*\{([^{}]*)\}"), r"\\ (\\mathrm{mod}\\ \1)"),
+    (re.compile(r"\\bmod\b"), r"\\ \\mathrm{mod}\\ "),
+]
+
+
+def _normalize_mathtext(s):
+    for pat, rep in _MACRO_FIXUPS:
+        s = pat.sub(rep, s)
+    return s
+
+
+# --- matrix / cases environments ------------------------------------------
+# mathtext has no \begin{...} support at all, so matrix-family and cases
+# environments are composited here: each cell rendered through the normal
+# pipeline, laid out on a grid, delimiters drawn scaled to the stack.
+_MATRIX_ENVS = {
+    "pmatrix": ("(", ")"),
+    "bmatrix": ("[", "]"),
+    "Bmatrix": ("{", "}"),
+    "vmatrix": ("|", "|"),
+    "Vmatrix": ("|", "|"),
+    "matrix": (None, None),
+    "smallmatrix": (None, None),
+    "cases": ("{", None),
+}
+_MATRIX_ENV_RE = re.compile(
+    r"\\begin\{(pmatrix|bmatrix|Bmatrix|vmatrix|Vmatrix|matrix|smallmatrix"
+    r"|cases)\}(.*?)\\end\{\1\}",
+    re.DOTALL,
+)
+
+# Fraction of the font size the math axis sits above the baseline; grids
+# (like mathtext's own fractions) are centered vertically on this axis.
+_AXIS_FRACTION = 0.26
+
+
+def _split_nested(s, sep):
+    """Split `s` on `sep` occurrences that are not inside a nested
+    \\begin{...}\\end{...} block."""
+    parts, buf, depth, i = [], [], 0, 0
+    while i < len(s):
+        if s.startswith("\\begin", i):
+            depth += 1
+            buf.append("\\begin")
+            i += 6
+            continue
+        if s.startswith("\\end", i):
+            depth = max(0, depth - 1)
+            buf.append("\\end")
+            i += 4
+            continue
+        if depth == 0 and s.startswith(sep, i):
+            parts.append("".join(buf))
+            buf = []
+            i += len(sep)
+            continue
+        buf.append(s[i])
+        i += 1
+    parts.append("".join(buf))
+    return parts
+
+
+def _snippet_strokes(inner, size_pt):
+    """Render bare mathtext content (no $ delimiters) to baseline-anchored
+    stroke arrays via the raster/skeleton pipeline. No jitter."""
+    mask, px_per_pt, baseline_px = _rasterize(f"${inner}$", size_pt=size_pt)
+    polylines = _skeleton_to_polylines(mask)
+    return _polylines_to_points(polylines, mask.shape[0], px_per_pt, baseline_px)
+
+
+def _strokes_extent(strokes):
+    """(min_x, min_y, max_x, max_y) over stroke arrays, or None if empty."""
+    if not strokes:
+        return None
+    all_pts = np.concatenate(strokes, axis=0)
+    return (float(all_pts[:, 0].min()), float(all_pts[:, 1].min()),
+            float(all_pts[:, 0].max()), float(all_pts[:, 1].max()))
+
+
+def _shift(strokes, dx, dy):
+    return [s + np.array([dx, dy]) for s in strokes]
+
+
+def _delimiter_strokes(ch, font_size_pt, target_height, center_y):
+    """Render a delimiter glyph in the plain handwriting font and scale it
+    (uniformly in y, proportionally in x) to span `target_height`, centered
+    vertically on `center_y`. Returns (strokes, width)."""
+    mask, px_per_pt, baseline_px = _rasterize_plain(ch, font_size_pt)
+    polylines = _skeleton_to_polylines(mask)
+    strokes = _polylines_to_points(polylines, mask.shape[0], px_per_pt, baseline_px)
+    ext = _strokes_extent(strokes)
+    if ext is None or ext[3] - ext[1] <= 0:
+        return [], 0.0
+    x0, y0, x1, y1 = ext
+    scale = target_height / (y1 - y0)
+    # Stretch mostly vertically; let width grow only mildly so a tall "("
+    # stays slender like a hand-drawn big paren.
+    x_scale = min(scale, 1.0 + 0.25 * (scale - 1.0)) if scale > 1.0 else scale
+    mid_y = (y0 + y1) / 2.0
+    out = []
+    for s in strokes:
+        pts = s.copy()
+        pts[:, 0] = (pts[:, 0] - x0) * x_scale
+        pts[:, 1] = (pts[:, 1] - mid_y) * scale + center_y
+        out.append(pts)
+    return out, (x1 - x0) * x_scale
+
+
+def _render_env_grid(env, body, font_size_pt):
+    """Composite a matrix-family or cases environment: render each cell,
+    lay the cells out on a grid centered on the math axis, and add scaled
+    delimiters. Returns baseline-anchored strokes (possibly empty)."""
+    cell_size = font_size_pt * 0.9
+    rows = [r for r in (_split_nested(body, "\\\\")) if r.strip()]
+    grid = []
+    for row in rows:
+        cells = [c.strip() for c in _split_nested(row, "&")]
+        rendered = []
+        for cell in cells:
+            strokes = _snippet_strokes(cell, cell_size) if cell else []
+            rendered.append((strokes, _strokes_extent(strokes)))
+        grid.append(rendered)
+    if not grid:
+        return []
+
+    n_cols = max(len(r) for r in grid)
+    col_w = [0.0] * n_cols
+    row_asc, row_desc = [], []
+    min_asc = 0.45 * cell_size  # empty/short rows still take vertical room
+    for cells in grid:
+        asc, desc = min_asc, 0.0
+        for j, (_, ext) in enumerate(cells):
+            if ext is None:
+                continue
+            col_w[j] = max(col_w[j], ext[2] - ext[0])
+            asc = max(asc, ext[3])
+            desc = max(desc, -ext[1])
+        row_asc.append(asc)
+        row_desc.append(desc)
+
+    col_gap = 0.55 * font_size_pt
+    row_gap = 0.4 * font_size_pt
+    grid_w = sum(col_w) + col_gap * max(0, n_cols - 1)
+    grid_h = sum(a + d for a, d in zip(row_asc, row_desc)) \
+        + row_gap * max(0, len(grid) - 1)
+    axis_y = _AXIS_FRACTION * font_size_pt
+    top_y = axis_y + grid_h / 2.0
+
+    strokes = []
+    y_cursor = top_y
+    for i, cells in enumerate(grid):
+        row_baseline = y_cursor - row_asc[i]
+        for j, (cell_strokes, ext) in enumerate(cells):
+            if ext is None:
+                continue
+            x_off = sum(col_w[:j]) + col_gap * j
+            # center the cell inside its column
+            x_off += (col_w[j] - (ext[2] - ext[0])) / 2.0 - ext[0]
+            strokes.extend(_shift(cell_strokes, x_off, row_baseline))
+        y_cursor = row_baseline - row_desc[i] - row_gap
+
+    left_ch, right_ch = _MATRIX_ENVS[env]
+    delim_h = grid_h * 1.1
+    delim_gap = 0.18 * font_size_pt
+    out = []
+    x_cursor = 0.0
+    if left_ch:
+        d_strokes, d_w = _delimiter_strokes(left_ch, font_size_pt, delim_h, axis_y)
+        out.extend(_shift(d_strokes, x_cursor, 0.0))
+        x_cursor += d_w + delim_gap
+    out.extend(_shift(strokes, x_cursor, 0.0))
+    x_cursor += grid_w
+    if right_ch:
+        x_cursor += delim_gap
+        d_strokes, d_w = _delimiter_strokes(right_ch, font_size_pt, delim_h, axis_y)
+        out.extend(_shift(d_strokes, x_cursor, 0.0))
+    return out
+
+
+def _compose_snippet(inner, font_size_pt):
+    """Render mathtext content, compositing any matrix/cases environments
+    it contains alongside the ordinary mathtext segments on one baseline."""
+    segments = []
+    pos = 0
+    for m in _MATRIX_ENV_RE.finditer(inner):
+        if m.start() > pos:
+            segments.append(("math", inner[pos:m.start()]))
+        segments.append(("env", m.group(1), m.group(2)))
+        pos = m.end()
+    if pos < len(inner):
+        segments.append(("math", inner[pos:]))
+
+    if len(segments) == 1 and segments[0][0] == "math":
+        return _snippet_strokes(inner, font_size_pt)
+
+    strokes = []
+    x_cursor = 0.0
+    seg_gap = 0.35 * font_size_pt
+    for seg in segments:
+        if seg[0] == "math":
+            if not seg[1].strip():
+                continue
+            seg_strokes = _snippet_strokes(seg[1].strip(), font_size_pt)
+        else:
+            seg_strokes = _render_env_grid(seg[1], seg[2], font_size_pt)
+        ext = _strokes_extent(seg_strokes)
+        if ext is None:
+            continue
+        strokes.extend(_shift(seg_strokes, x_cursor - ext[0], 0.0))
+        x_cursor += (ext[2] - ext[0]) + seg_gap
+    return strokes
+
+
 def render_math_strokes(snippet, font_size_pt=24, jitter=True, seed=0):
     """Render a mathtext snippet to hand-sketched strokes.
 
@@ -286,13 +513,10 @@ def render_math_strokes(snippet, font_size_pt=24, jitter=True, seed=0):
     # one balanced $...$ pair -- an odd $ count makes matplotlib render the
     # string literally, delimiters and all.
     inner = inner.replace("\\$", "$").replace("$", "\\$")
+    inner = _normalize_mathtext(inner).strip()
     if not inner:
         return [], 0.0, 0.0
-    mathtext = f"${inner}$"
-    mask, px_per_pt, baseline_px = _rasterize(mathtext, size_pt=font_size_pt)
-    polylines = _skeleton_to_polylines(mask)
-    h_px = mask.shape[0]
-    strokes = _polylines_to_points(polylines, h_px, px_per_pt, baseline_px)
+    strokes = _compose_snippet(inner, font_size_pt)
     if jitter:
         strokes = _jitter_polylines(strokes, TREMOR_AMP_PT, TREMOR_WAVELENGTH_PT, seed=seed)
 
