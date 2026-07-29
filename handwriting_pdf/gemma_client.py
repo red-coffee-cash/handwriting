@@ -214,35 +214,98 @@ def _parse_answer_json(raw):
     return None
 
 
-# Matches a $...$ math span. The opening `$` must be followed by a character
-# that isn't a digit or whitespace, so currency like "$5", "$ 50", or
-# "costs $5 and $3 more" is NOT misread as a math run -- a real math span
-# starts with a letter, backslash macro, brace, sign, etc. (A bare "$5$"
-# meaning the literal number 5 falls through to the text path, where the RNN
-# draws "5" just fine, so nothing is lost.) Content still may not contain $.
-_MATH_RUN_RE = re.compile(r"\$([^\d\s$][^$]*)\$")
+# Matches an explicitly delimited math span, most specific delimiter first:
+# $$...$$ (display), \[...\], \(...\), then plain $...$. For the single-$
+# form the opening `$` must be followed by a character that isn't a digit
+# or whitespace, so currency like "$5", "$ 50", or "costs $5 and $3 more"
+# is NOT misread as a math run -- a real math span starts with a letter,
+# backslash macro, brace, sign, etc. (A bare "$5$" meaning the literal
+# number 5 falls through to the text path, where the RNN draws "5" just
+# fine, so nothing is lost.)
+_DELIM_MATH_RE = re.compile(
+    r"\$\$(?P<display>.+?)\$\$"
+    r"|\\\[(?P<bracket>.+?)\\\]"
+    r"|\\\((?P<paren>.+?)\\\)"
+    r"|\$(?P<inline>[^\d\s$][^$]*)\$",
+    re.DOTALL,
+)
+
+# Bare (undelimited) LaTeX detection over whitespace tokens of a text chunk.
+# A "strong" token unambiguously signals LaTeX: a \command macro or a
+# superscript/subscript. A "weak" token is operator/number material (digits,
+# + - * / = < > braces parens punctuation, no letters) that may belong to a
+# surrounding expression but never triggers math on its own -- so plain
+# prose and arithmetic like "12 + 7 = 19" stay text (render_box already
+# routes undrawable characters through the math renderer).
+_STRONG_LATEX_RE = re.compile(r"\\[a-zA-Z]+|[\^_]")
+_WEAK_MATH_RE = re.compile(r"^[0-9+\-*/=<>(){}\[\].,:%|]+$")
+
+
+def _classify_token(tok):
+    if _STRONG_LATEX_RE.search(tok):
+        return "strong"
+    if _WEAK_MATH_RE.match(tok):
+        return "weak"
+    return "text"
+
+
+def _split_bare_latex(chunk):
+    """Split a $-free text chunk into ("text"|"math", value) pieces,
+    pulling out maximal token spans of strong/weak math tokens that contain
+    at least one strong token -- so "\\frac{1}{2} + \\sqrt{2}" stays one
+    atomic math run instead of being word-wrapped into five fragments."""
+    tokens = chunk.split()
+    pieces = []
+    text_buf = []
+    i = 0
+    while i < len(tokens):
+        if _classify_token(tokens[i]) == "text":
+            text_buf.append(tokens[i])
+            i += 1
+            continue
+        j = i
+        has_strong = False
+        while j < len(tokens) and _classify_token(tokens[j]) != "text":
+            has_strong = has_strong or _classify_token(tokens[j]) == "strong"
+            j += 1
+        if has_strong:
+            if text_buf:
+                pieces.append(("text", " ".join(text_buf)))
+                text_buf = []
+            pieces.append(("math", " ".join(tokens[i:j])))
+        else:
+            text_buf.extend(tokens[i:j])
+        i = j
+    if text_buf:
+        pieces.append(("text", " ".join(text_buf)))
+    return pieces
 
 
 def split_runs(answer_text):
     """Split an answer string into alternating text/math runs.
 
+    Recognizes $...$, $$...$$, \\(...\\), and \\[...\\] delimited math, plus
+    undelimited LaTeX the model forgot to wrap (see _split_bare_latex).
     Returns a list of {"kind": "text" | "math", "value": str} dicts, in
     order, covering the whole input. Empty text runs (e.g. answer starts
-    or ends with math) are omitted.
+    or ends with math) are omitted. Unpaired delimiters are left as text.
     """
     runs = []
     pos = 0
-    for m in _MATH_RUN_RE.finditer(answer_text):
+
+    def add_text(chunk):
+        if not chunk.strip():
+            return
+        for kind, value in _split_bare_latex(chunk):
+            runs.append({"kind": kind, "value": value})
+
+    for m in _DELIM_MATH_RE.finditer(answer_text):
         if m.start() > pos:
-            text_chunk = answer_text[pos:m.start()]
-            if text_chunk.strip():
-                runs.append({"kind": "text", "value": text_chunk})
-        math_chunk = m.group(1).strip()
+            add_text(answer_text[pos:m.start()])
+        math_chunk = m.group(m.lastgroup).strip()
         if math_chunk:
             runs.append({"kind": "math", "value": math_chunk})
         pos = m.end()
     if pos < len(answer_text):
-        tail = answer_text[pos:]
-        if tail.strip():
-            runs.append({"kind": "text", "value": tail})
+        add_text(answer_text[pos:])
     return runs

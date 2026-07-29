@@ -63,14 +63,39 @@ def _ensure_font_registered():
     _font_registered = True
 
 
-def _rasterize_to_mask(fig, t, dpi):
+def _rasterize_to_mask(fig, t, dpi, ismath):
     """Tighten `fig` around text artist `t`, render, and return (mask,
-    px_per_pt). Shared tail of _rasterize and _rasterize_plain."""
-    bbox = t.get_window_extent(fig.canvas.get_renderer())
-    pad = 6
-    fig.set_size_inches((bbox.width + 2 * pad) / fig.dpi, (bbox.height + 2 * pad) / fig.dpi)
-    t.set_position((0, 0))
-    t.set_va("bottom")
+    px_per_pt, baseline_from_bottom_px). Shared tail of _rasterize and
+    _rasterize_plain.
+
+    The text is re-anchored with va="baseline" at a known figure position,
+    so the baseline row in the rendered image is exact by construction --
+    baseline_from_bottom_px is its distance above the image bottom. (Font
+    metrics alone can't be trusted for this: get_window_extent for mathtext
+    returns a full em box, not the ascent+descent layout box, so "bbox
+    bottom = baseline - descent" does not hold.) The metric descent is only
+    used to reserve enough room below the baseline for descenders.
+    """
+    renderer = fig.canvas.get_renderer()
+    bbox = t.get_window_extent(renderer)
+    try:
+        _, _, descent_px = renderer.get_text_width_height_descent(
+            t.get_text(), t.get_fontproperties(), ismath=ismath)
+    except ValueError:
+        # The artist itself decides math-ness per string (an odd number of
+        # unescaped $ renders literally), so a forced ismath=True parse can
+        # fail where draw() succeeded. Fall back to plain-text metrics
+        # rather than letting model garbage crash the whole render.
+        _, _, descent_px = renderer.get_text_width_height_descent(
+            t.get_text(), t.get_fontproperties(), ismath=False)
+    pad = 8
+    fig_w_px = bbox.width + 2 * pad
+    fig_h_px = bbox.height + 2 * pad
+    fig.set_size_inches(fig_w_px / fig.dpi, fig_h_px / fig.dpi)
+    x_frac = pad / fig_w_px
+    y_frac = (descent_px + pad) / fig_h_px
+    t.set_position((x_frac, y_frac))
+    t.set_va("baseline")
     t.set_ha("left")
     fig.canvas.draw()
     buf = fig.canvas.buffer_rgba()
@@ -80,7 +105,10 @@ def _rasterize_to_mask(fig, t, dpi):
     alpha = img[:, :, 3].astype(float)
     mask = alpha > 64
     px_per_pt = dpi / 72.0
-    return mask, px_per_pt
+    # The canvas may round the requested figure size to whole pixels; the
+    # baseline lands at y_frac of the *actual* height.
+    baseline_from_bottom_px = y_frac * h
+    return mask, px_per_pt, baseline_from_bottom_px
 
 
 def _rasterize_plain(snippet, size_pt, dpi=RASTER_DPI):
@@ -96,13 +124,15 @@ def _rasterize_plain(snippet, size_pt, dpi=RASTER_DPI):
     t = fig.text(0.02, 0.5, literal, fontsize=size_pt, va="center", ha="left",
                  fontproperties=fp, parse_math=False)
     fig.canvas.draw()
-    return _rasterize_to_mask(fig, t, dpi)
+    return _rasterize_to_mask(fig, t, dpi, ismath=False)
 
 
 def _rasterize(snippet, size_pt, dpi=RASTER_DPI):
     """Render a mathtext snippet to a binary numpy mask (True = ink) and
-    return (mask, px_per_pt) where px_per_pt converts mask pixel distances
-    to PDF points at the given font size."""
+    return (mask, px_per_pt, baseline_from_bottom_px) where px_per_pt
+    converts mask pixel distances to PDF points at the given font size and
+    baseline_from_bottom_px locates the text baseline above the mask
+    bottom."""
     fig = plt.figure(figsize=(8, 2), dpi=dpi)
     fig.patch.set_alpha(0)
     t = fig.text(0.02, 0.5, snippet, fontsize=size_pt, va="center", ha="left")
@@ -115,7 +145,7 @@ def _rasterize(snippet, size_pt, dpi=RASTER_DPI):
         # of crashing the whole generate request.
         plt.close(fig)
         return _rasterize_plain(snippet, size_pt, dpi=dpi)
-    return _rasterize_to_mask(fig, t, dpi)
+    return _rasterize_to_mask(fig, t, dpi, ismath=True)
 
 
 def _skeleton_to_polylines(mask):
@@ -219,12 +249,14 @@ def _jitter_polylines(polylines, tremor_amp, wavelength_pt, seed):
     return out
 
 
-def _polylines_to_points(polylines, mask_height_px, px_per_pt):
-    """Flip y (image space is y-down) and rescale pixels -> PDF points."""
+def _polylines_to_points(polylines, mask_height_px, px_per_pt, baseline_from_bottom_px):
+    """Flip y (image space is y-down), shift so y=0 is the text *baseline*
+    (which sits baseline_from_bottom_px above the mask bottom), and rescale
+    pixels -> PDF points. Descenders come out with negative y."""
     out = []
     for poly in polylines:
         pts = poly.copy()
-        pts[:, 1] = mask_height_px - pts[:, 1]
+        pts[:, 1] = (mask_height_px - pts[:, 1]) - baseline_from_bottom_px
         pts /= px_per_pt
         out.append(pts)
     return out
@@ -240,23 +272,34 @@ def render_math_strokes(snippet, font_size_pt=24, jitter=True, seed=0):
 
     Returns (strokes, width_pt, height_pt):
       strokes    -- list of (N, 2) point arrays in PDF points, origin at
-                    the snippet's bottom-left, y-up (matches the RNN's own
-                    stroke convention so render_box.py can mix the two).
+                    the snippet's baseline-left, y-up, descenders negative
+                    (matches the baseline convention render_box.py uses to
+                    mix these with RNN handwriting strokes on one line).
       width_pt, height_pt -- bounding size, for layout/scaling.
     """
     _ensure_font_registered()
-    mathtext = snippet if snippet.startswith("$") and snippet.endswith("$") else f"${snippet}$"
-    mask, px_per_pt = _rasterize(mathtext, size_pt=font_size_pt)
+    inner = snippet.strip()
+    if len(inner) >= 2 and inner.startswith("$") and inner.endswith("$"):
+        inner = inner[1:-1]
+    # Escape any remaining $ (e.g. currency "$5" routed here because the
+    # RNN alphabet has no $ glyph) so the wrapped string always has exactly
+    # one balanced $...$ pair -- an odd $ count makes matplotlib render the
+    # string literally, delimiters and all.
+    inner = inner.replace("\\$", "$").replace("$", "\\$")
+    if not inner:
+        return [], 0.0, 0.0
+    mathtext = f"${inner}$"
+    mask, px_per_pt, baseline_px = _rasterize(mathtext, size_pt=font_size_pt)
     polylines = _skeleton_to_polylines(mask)
     h_px = mask.shape[0]
-    strokes = _polylines_to_points(polylines, h_px, px_per_pt)
+    strokes = _polylines_to_points(polylines, h_px, px_per_pt, baseline_px)
     if jitter:
         strokes = _jitter_polylines(strokes, TREMOR_AMP_PT, TREMOR_WAVELENGTH_PT, seed=seed)
 
     if strokes:
         all_pts = np.concatenate(strokes, axis=0)
-        width_pt = float(all_pts[:, 0].max())
-        height_pt = float(all_pts[:, 1].max())
+        width_pt = float(all_pts[:, 0].max() - all_pts[:, 0].min())
+        height_pt = float(all_pts[:, 1].max() - all_pts[:, 1].min())
     else:
         width_pt = height_pt = 0.0
     return strokes, width_pt, height_pt

@@ -99,18 +99,22 @@ def _wrap_tokens(tokens, line_height, usable_width):
 
 
 def _group_line_tokens(line_tokens):
-    """Merge consecutive text tokens into single groups (one sample_strokes
-    call each, for natural cursive joins), keeping math tokens separate."""
+    """Merge consecutive RNN-drawable text tokens into single groups (one
+    sample_strokes call each, for natural cursive joins), keeping math
+    tokens separate. A text token the RNN can't draw (e.g. "$5" or "=")
+    also becomes its own group so only that word takes the math_render
+    detour -- merging it would drag the whole line through mathtext, which
+    ignores literal spaces and crams the words together."""
     groups = []
     buf = []
     for kind, value in line_tokens:
-        if kind == "text":
+        if kind == "text" and _rnn_can_render(value):
             buf.append(value)
         else:
             if buf:
                 groups.append(("text", " ".join(buf)))
                 buf = []
-            groups.append(("math", value))
+            groups.append((kind, value))
     if buf:
         groups.append(("text", " ".join(buf)))
     return groups
@@ -139,6 +143,17 @@ def _render_line(line_tokens, line_height, bias, style_prime, seed):
             # (see render.py); rescale to this tier's line height.
             rnn_scale = line_height / 48.0
             group_pts = [np.asarray(seg, dtype=float) * rnn_scale for seg in segments]
+            # drawing.align() zeroes the regression line through ALL ink
+            # points, which sits near mid x-height -- not the baseline this
+            # function's output convention (and math_render) assume at y=0.
+            # Estimate the true baseline as a low percentile of y: most
+            # strokes bottom out at the baseline, only descenders go lower.
+            if group_pts:
+                all_y = np.concatenate([p[:, 1] for p in group_pts])
+                if len(all_y) >= 8:
+                    baseline_shift = float(np.percentile(all_y, 15))
+                    for pts in group_pts:
+                        pts[:, 1] -= baseline_shift
         else:
             # Math runs -- and text the RNN has no glyphs for (e.g. a bare
             # "12 + 7 = 19" the model didn't wrap in $...$) -- go through the
