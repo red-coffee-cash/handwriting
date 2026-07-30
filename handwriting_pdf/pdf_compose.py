@@ -25,15 +25,36 @@ def compose(session_path, out_path):
     for q in ls.active_questions(session):
         for stroke in q.get("strokes") or []:
             points = stroke["points"]
-            if len(points) < 2:
+            if not points:
                 continue
+            width = stroke.get("width_pt", DEFAULT_STROKE_WIDTH)
             page = doc[q["box"]["page"]]
             shape = page.new_shape()
+            xs = [p[0] for p in points]
+            ys = [p[1] for p in points]
+            if len(points) < 2 or (max(xs) - min(xs) < width and max(ys) - min(ys) < width):
+                # Degenerate micro-stroke (a \cdot, an i-dot, colon dots):
+                # a near-zero-length line renders invisibly, so draw an
+                # ink dot instead.
+                cx = sum(xs) / len(xs)
+                cy = sum(ys) / len(ys)
+                shape.draw_circle(fitz.Point(cx, cy), width / 2)
+                shape.finish(width=0, color=STROKE_COLOR, fill=STROKE_COLOR)
+                shape.commit()
+                drawn += 1
+                continue
             shape.draw_polyline(points)
             shape.finish(
-                width=stroke.get("width_pt", DEFAULT_STROKE_WIDTH),
+                width=width,
                 color=STROKE_COLOR,
                 fill=None,
+                # closePath defaults to True, which draws a straight chord
+                # from each stroke's end back to its start -- on open pen
+                # strokes that slashes every glyph. Round caps/joins so
+                # segment joints look like ink, not mitred spikes.
+                closePath=False,
+                lineCap=1,
+                lineJoin=1,
             )
             shape.commit()
             drawn += 1

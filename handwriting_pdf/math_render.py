@@ -173,6 +173,13 @@ def _skeleton_to_polylines(mask):
     def edge_key(a, b):
         return (a, b) if a <= b else (b, a)
 
+    # Isolated pixels are whole glyphs at small sizes (a \cdot, an i-dot,
+    # a period skeletonizes to one pixel) -- emit them as single-point
+    # polylines instead of dropping them, so renderers can draw ink dots.
+    for n in g.nodes:
+        if g.degree(n) == 0:
+            polylines.append(np.array([n], dtype=float))
+
     special = [n for n in g.nodes if g.degree(n) != 2]
 
     def walk(start, nxt):
