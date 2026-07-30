@@ -42,12 +42,19 @@ _MATH_WIDTH_CACHE_MAX = 512
 _math_width_cache = {}
 
 
-# The RNN is trained on full handwritten lines and needs a few characters
-# of context to settle into letterforms. Asked for a one- or two-character
-# fragment -- a lone comma between two math runs, "so" -- it emits a
-# meaningless squiggle instead, so those go to the handwriting-font
-# renderer (math_render.render_text_strokes) which draws them crisply.
-_MIN_RNN_ALNUM = 3
+# The RNN is trained on full handwritten lines and needs a run of context to
+# settle into letterforms. On a short fragment it garbles the tail -- "Box:"
+# comes out "Ber.", "Write" loses its "e", a lone comma is just a squiggle --
+# and whether a given fragment survives depends on the sample seed, so it
+# can't be fixed by retrying. Fragments below this many alphanumeric
+# characters therefore go to the handwriting-font renderer
+# (math_render.render_text_strokes), which draws them crisply at any length.
+#
+# Only *isolated* fragments are affected: _group_line_tokens merges adjacent
+# text tokens, so running prose ("by symmetry", "Conclude that") clears the
+# bar easily and still gets real RNN handwriting. The short connectives that
+# fall back sit next to math runs, which are drawn in the same font anyway.
+_MIN_RNN_ALNUM = 7
 
 
 def _rnn_can_render(text):
