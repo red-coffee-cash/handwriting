@@ -42,9 +42,22 @@ _MATH_WIDTH_CACHE_MAX = 512
 _math_width_cache = {}
 
 
+# The RNN is trained on full handwritten lines and needs a few characters
+# of context to settle into letterforms. Asked for a one- or two-character
+# fragment -- a lone comma between two math runs, "so" -- it emits a
+# meaningless squiggle instead, so those go to the handwriting-font
+# renderer (math_render.render_text_strokes) which draws them crisply.
+_MIN_RNN_ALNUM = 3
+
+
 def _rnn_can_render(text):
     """True if every character in `text` is in the RNN's drawable alphabet."""
     return all(ch in _RNN_CHARS for ch in text)
+
+
+def _rnn_reliable(text):
+    """True if `text` is long enough for the RNN to produce real letters."""
+    return sum(ch.isalnum() for ch in text) >= _MIN_RNN_ALNUM
 
 
 def _tokenize_runs(runs):
@@ -143,7 +156,7 @@ def _render_line(line_tokens, line_height, bias, style_prime, seed):
     # Seed per group is keyed off its index, not a running counter, so that a
     # skipped (empty-render) group doesn't shift the seeds of later groups.
     for gi, (kind, value) in enumerate(groups):
-        if kind == "text" and _rnn_can_render(value):
+        if kind == "text" and _rnn_can_render(value) and _rnn_reliable(value):
             offsets = sample_strokes(
                 value, bias=bias, style_prime=style_prime,
                 seed=None if seed is None else seed + gi,
@@ -168,12 +181,17 @@ def _render_line(line_tokens, line_height, bias, style_prime, seed):
             # Math runs -- and text the RNN has no glyphs for (e.g. a bare
             # "12 + 7 = 19" the model didn't wrap in $...$) -- go through the
             # mathtext path so operators/symbols render instead of becoming
-            # null-character noise.
+            # null-character noise. Short text fragments the RNN can't draw
+            # reliably take the same font, but with math parsing off so a
+            # word stays a word.
             if seed is None:
                 math_seed = int(np.random.randint(0, 2 ** 31 - 1))
             else:
                 math_seed = seed + gi
-            group_strokes, _, _ = math_render.render_math_strokes(
+            renderer = (math_render.render_text_strokes
+                        if kind == "text" and _rnn_can_render(value)
+                        else math_render.render_math_strokes)
+            group_strokes, _, _ = renderer(
                 value, font_size_pt=line_height * 0.85, jitter=True, seed=math_seed,
             )
             group_pts = [np.asarray(s, dtype=float) for s in group_strokes]

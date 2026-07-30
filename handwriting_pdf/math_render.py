@@ -496,6 +496,33 @@ def _compose_snippet(inner, font_size_pt):
     return strokes
 
 
+def render_text_strokes(text, font_size_pt=24, jitter=True, seed=0):
+    """Render literal text as handwriting-font strokes, with no math
+    parsing at all.
+
+    This is the escape hatch for fragments the handwriting RNN can't draw
+    reliably -- a lone comma or period between two math runs, a two-letter
+    word -- where it emits noise instead of letterforms. Same
+    (strokes, width_pt, height_pt) contract as render_math_strokes,
+    baseline-anchored.
+    """
+    _ensure_font_registered()
+    if not text.strip():
+        return [], 0.0, 0.0
+    mask, px_per_pt, baseline_px = _rasterize_plain(text, font_size_pt)
+    polylines = _skeleton_to_polylines(mask)
+    strokes = _polylines_to_points(polylines, mask.shape[0], px_per_pt, baseline_px)
+    if jitter:
+        strokes = _jitter_polylines(strokes, TREMOR_AMP_PT, TREMOR_WAVELENGTH_PT, seed=seed)
+    if strokes:
+        all_pts = np.concatenate(strokes, axis=0)
+        width_pt = float(all_pts[:, 0].max() - all_pts[:, 0].min())
+        height_pt = float(all_pts[:, 1].max() - all_pts[:, 1].min())
+    else:
+        width_pt = height_pt = 0.0
+    return strokes, width_pt, height_pt
+
+
 def render_math_strokes(snippet, font_size_pt=24, jitter=True, seed=0):
     """Render a mathtext snippet to hand-sketched strokes.
 
