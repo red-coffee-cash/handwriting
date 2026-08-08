@@ -23,7 +23,7 @@ import requests
 # produces a connection-refused error even while IPv4 access works fine.
 DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
 DEFAULT_MODEL = "gemma4:12b"
-REQUEST_TIMEOUT = 120
+REQUEST_TIMEOUT = 300
 STARTUP_TIMEOUT = 30
 
 # Handle to the `ollama serve` process we launched (if any), plus the temp
@@ -46,6 +46,12 @@ SYSTEM_PROMPT = (
     "at all. The ONLY exception is if the problem itself explicitly asks "
     "for an explanation, justification, or proof; in that case, write the "
     "explanation or proof as required.\n"
+    "Use simple LaTeX only: \\frac, \\sqrt, powers and subscripts, \\sum, "
+    "\\int, \\lim, Greek letters, \\leq, \\geq, \\neq. Put each step of "
+    "your work on its own line using \\n newlines in the JSON string; do "
+    "NOT use \\begin{aligned} or other alignment environments. Matrices "
+    "may be written with \\begin{pmatrix} ... \\end{pmatrix} and piecewise "
+    "definitions with \\begin{cases} ... \\end{cases}.\n"
     "Respond with only the JSON object, no other text."
 )
 
@@ -214,35 +220,191 @@ def _parse_answer_json(raw):
     return None
 
 
-# Matches a $...$ math span. The opening `$` must be followed by a character
-# that isn't a digit or whitespace, so currency like "$5", "$ 50", or
-# "costs $5 and $3 more" is NOT misread as a math run -- a real math span
-# starts with a letter, backslash macro, brace, sign, etc. (A bare "$5$"
-# meaning the literal number 5 falls through to the text path, where the RNN
-# draws "5" just fine, so nothing is lost.) Content still may not contain $.
-_MATH_RUN_RE = re.compile(r"\$([^\d\s$][^$]*)\$")
+# Matches an explicitly delimited math span, most specific delimiter first:
+# $$...$$ (display), \[...\], \(...\), then plain $...$. A $...$ span whose
+# content starts with a digit or whitespace might be currency instead of
+# math ("costs $5 and $3 more" pairs into "$5 and $"); split_runs resolves
+# that ambiguity with _inline_span_is_currency rather than a regex guard,
+# so legitimate digit-start math like "$2x + 1$" or "$2\pi r$" still counts.
+_DELIM_MATH_RE = re.compile(
+    r"\$\$(?P<display>.+?)\$\$"
+    r"|\\\[(?P<bracket>.+?)\\\]"
+    r"|\\\((?P<paren>.+?)\\\)"
+    r"|\$(?P<inline>[^$]+)\$",
+    re.DOTALL,
+)
+
+_BARE_NUMBER_RE = re.compile(r"\d[\d,]*(\.\d+)?")
+_ALPHA_WORD_RE = re.compile(r"[A-Za-z]{2,}")
+
+
+def _inline_span_is_currency(content):
+    """Heuristic for a $...$ span whose content starts with a digit or
+    whitespace: it's money-flavored prose (not math) if it is a bare number
+    ("$5$") or contains a multi-letter English word ("$5 and $" from
+    "costs $5 and $3"). Digit-start algebra like "2x + 1" or "2\\pi r" has
+    neither, so it stays math."""
+    stripped = content.strip()
+    if _BARE_NUMBER_RE.fullmatch(stripped):
+        return True
+    return any(_ALPHA_WORD_RE.fullmatch(tok) for tok in stripped.split())
+
+
+# Alignment-only environments: mathtext can't parse them, but their content
+# is just rows of ordinary math, so split_runs unwraps them and emits one
+# math run per row. (Matrix/cases environments are NOT in this list -- they
+# carry 2D structure and are composited specially by math_render.)
+_ALIGN_ENV_RE = re.compile(
+    r"\\begin\{(aligned|align\*?|gathered|gather\*?|eqnarray\*?|split)\}"
+    r"(.*?)\\end\{\1\}",
+    re.DOTALL,
+)
+
+
+def _split_top_level_rows(value):
+    """Split a math snippet on \\\\ row separators that are not nested
+    inside a \\begin{...}\\end{...} block, dropping top-level alignment &s
+    (matrix/cases cell separators are below top level and untouched)."""
+    rows, buf, depth, i = [], [], 0, 0
+    n = len(value)
+    while i < n:
+        if value.startswith("\\begin", i):
+            depth += 1
+            buf.append("\\begin")
+            i += 6
+            continue
+        if value.startswith("\\end", i):
+            depth = max(0, depth - 1)
+            buf.append("\\end")
+            i += 4
+            continue
+        if depth == 0 and value.startswith("\\\\", i):
+            rows.append("".join(buf))
+            buf = []
+            i += 2
+            continue
+        if depth == 0 and value[i] == "&":
+            i += 1
+            continue
+        buf.append(value[i])
+        i += 1
+    rows.append("".join(buf))
+    return [r.strip() for r in rows if r.strip()]
+
+
+def _explode_math_value(value):
+    """Turn one delimited math span into a list of row snippets: unwrap
+    alignment-only environments, then split multi-line derivations on
+    top-level \\\\ so each step can go on its own rendered line."""
+    value = _ALIGN_ENV_RE.sub(lambda m: m.group(2), value)
+    return _split_top_level_rows(value)
+
+# Bare (undelimited) LaTeX detection over whitespace tokens of a text chunk.
+# A "strong" token unambiguously signals LaTeX: a \command macro or a
+# superscript/subscript. A "weak" token is operator/number material (digits,
+# + - * / = < > braces parens punctuation, no letters) that may belong to a
+# surrounding expression but never triggers math on its own -- so plain
+# prose and arithmetic like "12 + 7 = 19" stay text (render_box already
+# routes undrawable characters through the math renderer).
+_STRONG_LATEX_RE = re.compile(r"\\[a-zA-Z]+|[\^_]")
+_WEAK_MATH_RE = re.compile(r"^[0-9+\-*/=<>(){}\[\].,:%|&\\]+$")
+
+
+def _classify_token(tok):
+    if _STRONG_LATEX_RE.search(tok):
+        return "strong"
+    if _WEAK_MATH_RE.match(tok):
+        return "weak"
+    return "text"
+
+
+def _split_bare_latex(chunk):
+    """Split a $-free text chunk into ("text"|"math", value) pieces,
+    pulling out maximal token spans of strong/weak math tokens that contain
+    at least one strong token -- so "\\frac{1}{2} + \\sqrt{2}" stays one
+    atomic math run instead of being word-wrapped into five fragments."""
+    tokens = chunk.split()
+    pieces = []
+    text_buf = []
+    i = 0
+    while i < len(tokens):
+        if _classify_token(tokens[i]) == "text":
+            text_buf.append(tokens[i])
+            i += 1
+            continue
+        j = i
+        has_strong = False
+        while j < len(tokens) and _classify_token(tokens[j]) != "text":
+            has_strong = has_strong or _classify_token(tokens[j]) == "strong"
+            j += 1
+        if has_strong:
+            if text_buf:
+                pieces.append(("text", " ".join(text_buf)))
+                text_buf = []
+            pieces.append(("math", " ".join(tokens[i:j])))
+        else:
+            text_buf.extend(tokens[i:j])
+        i = j
+    if text_buf:
+        pieces.append(("text", " ".join(text_buf)))
+    return pieces
 
 
 def split_runs(answer_text):
-    """Split an answer string into alternating text/math runs.
+    """Split an answer string into text/math/break runs.
 
-    Returns a list of {"kind": "text" | "math", "value": str} dicts, in
-    order, covering the whole input. Empty text runs (e.g. answer starts
-    or ends with math) are omitted.
+    Recognizes $...$, $$...$$, \\(...\\), and \\[...\\] delimited math, plus
+    undelimited LaTeX the model forgot to wrap (see _split_bare_latex).
+    Multi-line answers and multi-row math (aligned blocks, top-level \\\\)
+    produce {"kind": "break"} runs so the renderer can keep each derivation
+    step on its own line. Returns a list of {"kind": "text" | "math",
+    "value": str} / {"kind": "break"} dicts, in order. Empty text runs are
+    omitted; unpaired delimiters are left as text.
     """
     runs = []
+
+    def add_break():
+        if runs and runs[-1]["kind"] != "break":
+            runs.append({"kind": "break"})
+
+    def add_text(chunk):
+        for li, line in enumerate(chunk.split("\n")):
+            if li:
+                add_break()
+            if line.strip():
+                for kind, value in _split_bare_latex(line):
+                    runs.append({"kind": kind, "value": value})
+
+    def add_math(value):
+        for ri, row in enumerate(_explode_math_value(value)):
+            if ri:
+                add_break()
+            runs.append({"kind": "math", "value": row})
+
     pos = 0
-    for m in _MATH_RUN_RE.finditer(answer_text):
+    scan = 0
+    while True:
+        m = _DELIM_MATH_RE.search(answer_text, scan)
+        if m is None:
+            break
+        if m.lastgroup == "inline":
+            content = m.group("inline")
+            if (content[:1].isdigit() or content[:1].isspace()) \
+                    and _inline_span_is_currency(content):
+                # Money, not math ("$5 and $" from "costs $5 and $3").
+                # Leave it in the text stream and retry just past the
+                # opening $ so a real math span later on isn't missed.
+                scan = m.start() + 1
+                continue
         if m.start() > pos:
-            text_chunk = answer_text[pos:m.start()]
-            if text_chunk.strip():
-                runs.append({"kind": "text", "value": text_chunk})
-        math_chunk = m.group(1).strip()
+            add_text(answer_text[pos:m.start()])
+        math_chunk = m.group(m.lastgroup).strip()
         if math_chunk:
-            runs.append({"kind": "math", "value": math_chunk})
-        pos = m.end()
+            add_math(math_chunk)
+        pos = scan = m.end()
     if pos < len(answer_text):
-        tail = answer_text[pos:]
-        if tail.strip():
-            runs.append({"kind": "text", "value": tail})
+        add_text(answer_text[pos:])
+
+    while runs and runs[-1]["kind"] == "break":
+        runs.pop()
     return runs

@@ -6,5 +6,6 @@ pymupdf
 requests
 flask
 matplotlib
+mcp
 scikit-image
 networkx

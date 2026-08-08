@@ -72,6 +72,12 @@ renders those answers as handwriting (math expressions included, via a
 handwriting-font skeleton-traced renderer), and lets you place/edit
 everything in a browser GUI before compositing the result back onto the PDF.
 
+> **Prefer to let Claude do the solving?** The pipeline also ships an MCP
+> connector (`mcp_server.py`) and a `solve-worksheet` skill so Claude Code
+> can solve the problems itself, place the answers, and visually verify
+> the result — no Ollama needed. See [CLAUDE_SETUP.md](CLAUDE_SETUP.md)
+> for a from-zero guide.
+
 No API keys are involved — Ollama serves Gemma fully locally. Install it and
 pull a model first:
 

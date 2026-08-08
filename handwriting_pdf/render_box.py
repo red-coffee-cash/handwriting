@@ -25,6 +25,7 @@ from sample import sample_strokes
 
 LINE_HEIGHT_TIERS = [28, 22, 18, 14]
 BOX_PADDING = 4
+LINE_LEADING = 2.0  # minimum ink clearance (pt) enforced between adjacent lines
 WORD_GAP_FACTOR = 0.35  # gap between tokens on a line, as a fraction of line height
 CHAR_WIDTH_FACTOR = 0.55  # rough avg char width as a fraction of line height; wrap estimate only
 
@@ -41,20 +42,43 @@ _MATH_WIDTH_CACHE_MAX = 512
 _math_width_cache = {}
 
 
+# The RNN is trained on full handwritten lines and needs a run of context to
+# settle into letterforms. On a short fragment it garbles the tail -- "Box:"
+# comes out "Ber.", "Write" loses its "e", a lone comma is just a squiggle --
+# and whether a given fragment survives depends on the sample seed, so it
+# can't be fixed by retrying. Fragments below this many alphanumeric
+# characters therefore go to the handwriting-font renderer
+# (math_render.render_text_strokes), which draws them crisply at any length.
+#
+# Only *isolated* fragments are affected: _group_line_tokens merges adjacent
+# text tokens, so running prose ("by symmetry", "Conclude that") clears the
+# bar easily and still gets real RNN handwriting. The short connectives that
+# fall back sit next to math runs, which are drawn in the same font anyway.
+_MIN_RNN_ALNUM = 7
+
+
 def _rnn_can_render(text):
     """True if every character in `text` is in the RNN's drawable alphabet."""
     return all(ch in _RNN_CHARS for ch in text)
 
 
+def _rnn_reliable(text):
+    """True if `text` is long enough for the RNN to produce real letters."""
+    return sum(ch.isalnum() for ch in text) >= _MIN_RNN_ALNUM
+
+
 def _tokenize_runs(runs):
-    """Flatten text/math runs into a sequence of ("text", word) / ("math",
-    value) tokens, splitting text runs on whitespace so wrapping can break
-    between words while math runs stay atomic."""
+    """Flatten text/math/break runs into a sequence of ("text", word) /
+    ("math", value) / ("break", None) tokens, splitting text runs on
+    whitespace so wrapping can break between words while math runs stay
+    atomic. Break tokens force a new line (multi-step derivations)."""
     tokens = []
     for run in runs:
         if run["kind"] == "text":
             for word in run["value"].split():
                 tokens.append(("text", word))
+        elif run["kind"] == "break":
+            tokens.append(("break", None))
         else:
             tokens.append(("math", run["value"]))
     return tokens
@@ -85,6 +109,11 @@ def _wrap_tokens(tokens, line_height, usable_width):
     lines, current, current_width = [], [], 0.0
     gap = line_height * WORD_GAP_FACTOR
     for token in tokens:
+        if token[0] == "break":
+            if current:
+                lines.append(current)
+                current, current_width = [], 0.0
+            continue
         w = _estimate_token_width(token, line_height)
         added = w + (gap if current else 0.0)
         if current and current_width + added > usable_width:
@@ -99,27 +128,32 @@ def _wrap_tokens(tokens, line_height, usable_width):
 
 
 def _group_line_tokens(line_tokens):
-    """Merge consecutive text tokens into single groups (one sample_strokes
-    call each, for natural cursive joins), keeping math tokens separate."""
+    """Merge consecutive RNN-drawable text tokens into single groups (one
+    sample_strokes call each, for natural cursive joins), keeping math
+    tokens separate. A text token the RNN can't draw (e.g. "$5" or "=")
+    also becomes its own group so only that word takes the math_render
+    detour -- merging it would drag the whole line through mathtext, which
+    ignores literal spaces and crams the words together."""
     groups = []
     buf = []
     for kind, value in line_tokens:
-        if kind == "text":
+        if kind == "text" and _rnn_can_render(value):
             buf.append(value)
         else:
             if buf:
                 groups.append(("text", " ".join(buf)))
                 buf = []
-            groups.append(("math", value))
+            groups.append((kind, value))
     if buf:
         groups.append(("text", " ".join(buf)))
     return groups
 
 
 def _render_line(line_tokens, line_height, bias, style_prime, seed):
-    """Render one wrapped line. Returns (strokes, width, height) with
-    strokes positioned along a shared baseline at y=0, y-up, x starting
-    at 0."""
+    """Render one wrapped line. Returns (strokes, width, min_y, max_y)
+    with strokes positioned along a shared baseline at y=0, y-up, x
+    starting at 0; min_y/max_y are the line's ink extent around that
+    baseline (descent below, ascent above) for vertical layout."""
     groups = _group_line_tokens(line_tokens)
     gap = line_height * WORD_GAP_FACTOR
     strokes = []
@@ -129,7 +163,7 @@ def _render_line(line_tokens, line_height, bias, style_prime, seed):
     # Seed per group is keyed off its index, not a running counter, so that a
     # skipped (empty-render) group doesn't shift the seeds of later groups.
     for gi, (kind, value) in enumerate(groups):
-        if kind == "text" and _rnn_can_render(value):
+        if kind == "text" and _rnn_can_render(value) and _rnn_reliable(value):
             offsets = sample_strokes(
                 value, bias=bias, style_prime=style_prime,
                 seed=None if seed is None else seed + gi,
@@ -139,16 +173,32 @@ def _render_line(line_tokens, line_height, bias, style_prime, seed):
             # (see render.py); rescale to this tier's line height.
             rnn_scale = line_height / 48.0
             group_pts = [np.asarray(seg, dtype=float) * rnn_scale for seg in segments]
+            # drawing.align() zeroes the regression line through ALL ink
+            # points, which sits near mid x-height -- not the baseline this
+            # function's output convention (and math_render) assume at y=0.
+            # Estimate the true baseline as a low percentile of y: most
+            # strokes bottom out at the baseline, only descenders go lower.
+            if group_pts:
+                all_y = np.concatenate([p[:, 1] for p in group_pts])
+                if len(all_y) >= 8:
+                    baseline_shift = float(np.percentile(all_y, 15))
+                    for pts in group_pts:
+                        pts[:, 1] -= baseline_shift
         else:
             # Math runs -- and text the RNN has no glyphs for (e.g. a bare
             # "12 + 7 = 19" the model didn't wrap in $...$) -- go through the
             # mathtext path so operators/symbols render instead of becoming
-            # null-character noise.
+            # null-character noise. Short text fragments the RNN can't draw
+            # reliably take the same font, but with math parsing off so a
+            # word stays a word.
             if seed is None:
                 math_seed = int(np.random.randint(0, 2 ** 31 - 1))
             else:
                 math_seed = seed + gi
-            group_strokes, _, _ = math_render.render_math_strokes(
+            renderer = (math_render.render_text_strokes
+                        if kind == "text" and _rnn_can_render(value)
+                        else math_render.render_math_strokes)
+            group_strokes, _, _ = renderer(
                 value, font_size_pt=line_height * 0.85, jitter=True, seed=math_seed,
             )
             group_pts = [np.asarray(s, dtype=float) for s in group_strokes]
@@ -170,8 +220,7 @@ def _render_line(line_tokens, line_height, bias, style_prime, seed):
         max_y = max(max_y, group_max_y)
 
     width = max(0.0, x_cursor - gap) if groups else 0.0
-    height = max_y - min_y
-    return strokes, width, height
+    return strokes, width, min_y, max_y
 
 
 def render_answer_in_box(answer_runs, box, bias=0.75, style_prime=True, seed=None):
@@ -198,12 +247,27 @@ def render_answer_in_box(answer_runs, box, bias=0.75, style_prime=True, seed=Non
                          seed=None if seed is None else seed + 1000 * i)
             for i, line in enumerate(lines)
         ]
-        total_height = line_height * len(rendered_lines)
+        # Baseline positions from actual ink extents: tall math (nested
+        # fractions, big sums) can exceed the nominal line height, so each
+        # advance is at least line_height but grows to keep the previous
+        # line's descenders clear of this line's ascenders.
+        baselines = []
+        prev_descent = None
+        y = 0.0
+        for (_ls, _lw, line_min_y, line_max_y) in rendered_lines:
+            ascent = max(line_max_y, 0.0)
+            if prev_descent is None:
+                y = max(0.75 * line_height, ascent + 1.0)
+            else:
+                y += max(line_height, prev_descent + ascent + LINE_LEADING)
+            baselines.append(y)
+            prev_descent = max(-line_min_y, 0.0)
+        total_height = (baselines[-1] + prev_descent) if baselines else 0.0
         if total_height <= usable_height or tier_index == len(LINE_HEIGHT_TIERS) - 1:
-            chosen = (line_height, rendered_lines, total_height)
+            chosen = (line_height, rendered_lines, baselines, total_height)
             break
 
-    line_height, rendered_lines, total_height = chosen
+    line_height, rendered_lines, baselines, total_height = chosen
     warning = None
     extra_scale = 1.0
     if total_height > usable_height:
@@ -214,10 +278,10 @@ def render_answer_in_box(answer_runs, box, bias=0.75, style_prime=True, seed=Non
         )
 
     strokes = []
-    for i, (line_strokes, line_width, _line_h) in enumerate(rendered_lines):
+    for i, (line_strokes, line_width, _line_min_y, _line_max_y) in enumerate(rendered_lines):
         line_scale = min(1.0, usable_width / line_width) if line_width > 0 else 1.0
         combined_scale = line_scale * extra_scale
-        baseline_y = box["y0"] + BOX_PADDING + (i + 1) * line_height * extra_scale - line_height * 0.25 * extra_scale
+        baseline_y = box["y0"] + BOX_PADDING + baselines[i] * extra_scale
         for pts in line_strokes:
             # pts are baseline-relative, y-up (RNN/math convention). baseline_y
             # is the line's baseline in absolute page space (y-down, PyMuPDF),

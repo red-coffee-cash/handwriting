@@ -38,6 +38,13 @@ def create_app(session_path, ollama_url=gemma_client.DEFAULT_OLLAMA_URL, model=g
     def _workspace_dir():
         return os.path.dirname(os.path.abspath(session_path)) or "."
 
+    @app.errorhandler(KeyError)
+    def unknown_key(exc):
+        # ls.get_question raises KeyError for unknown question ids; give
+        # API clients (e.g. the MCP connector) a clean JSON 404 instead of
+        # Flask's HTML 500 page.
+        return jsonify({"ok": False, "error": str(exc)}), 404
+
     @app.get("/")
     def index():
         return send_from_directory(STATIC_DIR, "index.html")
@@ -95,6 +102,21 @@ def create_app(session_path, ollama_url=gemma_client.DEFAULT_OLLAMA_URL, model=g
         rect = _doc()[page_num].rect
         return jsonify({"width": rect.width, "height": rect.height})
 
+    @app.get("/api/page/<int:page_num>/preview.png")
+    def page_preview_png(page_num):
+        """Rasterize page `page_num` WITH the session's current strokes
+        composited onto it -- the GUI draws strokes client-side, so the
+        plain page PNG can't show results; this is for API clients (e.g.
+        the MCP connector) that verify placement visually."""
+        tmp_path = os.path.join(_workspace_dir(), "_preview.pdf")
+        pdf_compose.compose(session_path, tmp_path)
+        with fitz.open(tmp_path) as doc:
+            pix = doc[page_num].get_pixmap(
+                matrix=fitz.Matrix(PAGE_RENDER_ZOOM, PAGE_RENDER_ZOOM))
+            png = pix.tobytes("png")
+        os.remove(tmp_path)
+        return send_file(io.BytesIO(png), mimetype="image/png")
+
     @app.post("/api/session/questions/freeform")
     def create_freeform_question():
         """Create a new user-drawn, user-texted box, not tied to any
@@ -133,7 +155,13 @@ def create_app(session_path, ollama_url=gemma_client.DEFAULT_OLLAMA_URL, model=g
     def generate_answer(qid):
         session = ls.load(session_path)
         q = ls.get_question(session, qid)
-        if q.get("source") == "manual":
+        body = request.get_json(silent=True) or {}
+        override = (body.get("text") or "").strip()
+        if override:
+            # Caller-provided answer (e.g. the MCP connector, where Claude
+            # solves the problem itself) -- render it directly, no Ollama.
+            raw = override
+        elif q.get("source") == "manual":
             raw = (q.get("text") or "").strip()
             if not raw:
                 return jsonify({"ok": False, "error": "No text entered."}), 400
