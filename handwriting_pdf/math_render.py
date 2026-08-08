@@ -288,10 +288,30 @@ _MACRO_FIXUPS = [
 ]
 
 
+# Consecutive primes. mathtext sets them tight enough that the skeleton
+# centrelines of a double prime land ~1pt apart -- narrower than the pen
+# that draws them, so "y''" inks over into a single mark indistinguishable
+# from "y'". On a differential-equations worksheet that silently changes
+# the meaning, so the primes are re-spelled with thin spaces between them
+# (which triples the separation) before the expression is rendered.
+_PRIME_RUN_RE = re.compile(r"'{2,}|(?:\\prime){2,}")
+
+
+def _space_primes(match):
+    text = match.group(0)
+    if "'" in text:
+        # Bare apostrophes: mathtext superscripts these itself, so the
+        # replacement has to supply the superscript.
+        return "^{" + r"\,".join([r"\prime"] * len(text)) + "}"
+    # Explicit \prime macros are already inside a superscript; only the
+    # spacing between them is missing.
+    return r"\,".join([r"\prime"] * text.count(r"\prime"))
+
+
 def _normalize_mathtext(s):
     for pat, rep in _MACRO_FIXUPS:
         s = pat.sub(rep, s)
-    return s
+    return _PRIME_RUN_RE.sub(_space_primes, s)
 
 
 # --- matrix / cases environments ------------------------------------------

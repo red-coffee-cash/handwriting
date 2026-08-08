@@ -57,22 +57,113 @@ def locate_question_bbox(page, question_text):
     return [rect.x0, rect.y0, rect.x1, rect.y1]
 
 
+MIN_BOX_HEIGHT = 36
+DEFAULT_BOX_HEIGHT = 60
+PAGE_MARGIN = 36
+BOX_GAP = 6
+
+
+def text_line_bboxes(page):
+    """Every text line's bbox on the page, in reading order. Used both to
+    measure a question's true extent and to find the blank areas between
+    questions where an answer can actually go."""
+    lines = []
+    for block in page.get_text("dict")["blocks"]:
+        for line in block.get("lines", []):
+            if "".join(s["text"] for s in line["spans"]).strip():
+                lines.append(list(line["bbox"]))
+    return lines
+
+
+BLOCK_LINE_GAP = 10  # a question's own lines sit closer together than this
+
+
+def question_block_bbox(line_bboxes, first_line_bbox, next_first_line_bbox):
+    """The question's full on-page extent, not just its opening line.
+
+    locate_question_bbox only matches the first line, so a question that
+    carries a piecewise definition or a displayed formula under it reports
+    a bbox ending partway through itself -- and an answer box anchored to
+    that lands on top of the question.
+
+    A question is a run of closely-spaced lines: absorb lines downward
+    while each is within BLOCK_LINE_GAP of the run so far, and stop at the
+    first real gap. That gap is the blank answer area (or, on the last
+    question of a page, the space above the footer), so neither gets
+    counted as part of the question.
+    """
+    top = first_line_bbox[1]
+    limit = next_first_line_bbox[1] if next_first_line_bbox else float("inf")
+    # 1pt of slack: sub/superscript runs can sit a hair above their line.
+    candidates = sorted((lb for lb in line_bboxes
+                         if lb[1] >= top - 1 and lb[1] < limit - 1),
+                        key=lambda lb: lb[1])
+    bbox = list(first_line_bbox)
+    for lb in candidates:
+        if lb[1] - bbox[3] > BLOCK_LINE_GAP:
+            break
+        bbox[0] = min(bbox[0], lb[0])
+        bbox[1] = min(bbox[1], lb[1])
+        bbox[2] = max(bbox[2], lb[2])
+        bbox[3] = max(bbox[3], lb[3])
+    return bbox
+
+
+def _free_gaps_below(line_bboxes, y_from, page_rect):
+    """Vertical gaps below `y_from` that no text occupies, as (top, bottom)."""
+    spans = sorted((lb[1], lb[3]) for lb in line_bboxes)
+    gaps = []
+    cursor = y_from
+    for top, bottom in spans:
+        if bottom <= cursor:
+            continue
+        if top > cursor:
+            gaps.append((cursor, top))
+        cursor = max(cursor, bottom)
+    bottom_limit = page_rect.height - PAGE_MARGIN
+    if cursor < bottom_limit:
+        gaps.append((cursor, bottom_limit))
+    return gaps
+
+
 def suggest_answer_box(page, question_bbox, next_question_bbox, page_rect):
-    """Propose an answer box: starts just below the question's bbox, runs
-    to just above the next question's bbox (or the bottom margin if this
-    is the last question on the page), spans a comfortable answer height."""
-    margin = 36
-    x0 = question_bbox[0]
-    y0 = question_bbox[3] + 6
-    x1 = page_rect.width - margin
+    """Propose an answer box in the gap between this question and the next.
+
+    Returns None when that gap is too thin to write in -- the caller then
+    places the box in free space elsewhere (see fallback_answer_box) rather
+    than drawing it over the following question's text.
+    """
+    y0 = question_bbox[3] + BOX_GAP
     if next_question_bbox is not None:
-        y1_limit = next_question_bbox[1] - 6
+        y1_limit = next_question_bbox[1] - BOX_GAP
     else:
-        y1_limit = page_rect.height - margin
-    default_height = 60
-    y1 = min(y0 + default_height, y1_limit) if y1_limit > y0 else y0 + default_height
-    y1 = max(y1, y0 + 20)
-    return [x0, y0, x1, y1]
+        y1_limit = page_rect.height - PAGE_MARGIN
+    if y1_limit - y0 < MIN_BOX_HEIGHT:
+        return None
+    return [question_bbox[0], y0, page_rect.width - PAGE_MARGIN,
+            min(y0 + DEFAULT_BOX_HEIGHT, y1_limit)]
+
+
+def fallback_answer_box(question_bbox, page_rect, occupied):
+    """Place a box for a question with no room before the next one -- a
+    stem like "3. Let f(t) = {...}" whose parts follow immediately.
+
+    Picks the largest empty gap below the question, treating both printed
+    text and already-placed boxes as occupied, so these never land on the
+    page's content or on another question's answer space.
+    """
+    y0 = question_bbox[3] + BOX_GAP
+    gaps = [g for g in _free_gaps_below(occupied, y0, page_rect)
+            if g[1] - g[0] >= MIN_BOX_HEIGHT + BOX_GAP]
+    if gaps:
+        top, bottom = max(gaps, key=lambda g: g[1] - g[0])
+        return [question_bbox[0], top + BOX_GAP,
+                page_rect.width - PAGE_MARGIN,
+                min(top + BOX_GAP + DEFAULT_BOX_HEIGHT, bottom)]
+    # Page is full; keep the box on the page and let the user move it.
+    y1 = min(y0 + MIN_BOX_HEIGHT, page_rect.height - PAGE_MARGIN)
+    return [question_bbox[0], y1 - MIN_BOX_HEIGHT,
+            page_rect.width - PAGE_MARGIN, y1]
 
 
 def build_question_records(doc):
@@ -88,6 +179,13 @@ def build_question_records(doc):
         for chunk in chunks:
             bboxes.append(locate_question_bbox(page, chunk))
 
+        line_bboxes = text_line_bboxes(page)
+        # Two passes: first give every question the gap that follows it,
+        # then fit the leftovers (questions with no room before the next
+        # one) into whatever space those passes left free. Doing it in this
+        # order stops a stem from claiming the work area that belongs to
+        # the sub-questions underneath it.
+        blocks, boxes, pending = {}, {}, []
         for i, (chunk, bbox) in enumerate(zip(chunks, bboxes)):
             if bbox is None:
                 continue
@@ -96,7 +194,21 @@ def build_question_records(doc):
                 if nb is not None:
                     next_bbox = nb
                     break
-            box = suggest_answer_box(page, bbox, next_bbox, page.rect)
+            blocks[i] = question_block_bbox(line_bboxes, bbox, next_bbox)
+            box = suggest_answer_box(page, blocks[i], next_bbox, page.rect)
+            if box is None:
+                pending.append(i)
+            else:
+                boxes[i] = box
+        occupied = line_bboxes + list(boxes.values())
+        for i in pending:
+            boxes[i] = fallback_answer_box(blocks[i], page.rect, occupied)
+            occupied.append(boxes[i])
+
+        for i, (chunk, bbox) in enumerate(zip(chunks, bboxes)):
+            if bbox is None:
+                continue
+            box = boxes[i]
             records.append({
                 "id": f"q{qid}",
                 "text": chunk,
