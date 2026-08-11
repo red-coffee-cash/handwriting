@@ -11,7 +11,15 @@ import re
 
 import fitz  # PyMuPDF
 
-QUESTION_RE = re.compile(r"^\s*(?:\(?\d+[.)]|\(?[a-zA-Z][.)]|Q\d+[:.]?)\s+\S")
+_MARKER = r"\(?\d+[.)]|\(?[a-zA-Z][.)]|Q\d+[:.]?"
+# A question marker at the start of a line, with its text following.
+QUESTION_RE = re.compile(r"^\s*(?:%s)\s+\S" % _MARKER)
+# A marker sitting alone on its line. Exporters routinely break
+# "f.  y'' + 6y' + 9y = ..." so the marker lands on its own line with the
+# formula on the next -- those questions were being dropped entirely.
+# Accepted only when a content line follows (see _question_start_lines),
+# since a bare "x." is far more often the tail of an expression like 1/x.
+MARKER_ONLY_RE = re.compile(r"^\s*(?:%s)\s*$" % _MARKER)
 
 
 def load_pdf(path):
@@ -40,6 +48,39 @@ def split_into_questions(page_text):
     return chunks
 
 
+def page_lines(page):
+    """The page's text lines as (text, bbox), in reading order.
+
+    Questions are chunked from this same list rather than from a separate
+    page.get_text() pass, so each question's bbox is the bbox of the line
+    that starts it. The old approach searched the page for a question's
+    first line, which on documents with short repeated openings ("a. y",
+    "b. y", ...) matched the wrong occurrence and scattered answer boxes
+    to unrelated parts of the page.
+    """
+    out = []
+    for block in page.get_text("dict")["blocks"]:
+        for line in block.get("lines", []):
+            text = "".join(s["text"] for s in line["spans"])
+            if text.strip():
+                out.append((text, list(line["bbox"])))
+    return out
+
+
+def _question_start_lines(lines):
+    """Indices of lines that begin a question, given (text, bbox) lines."""
+    starts = []
+    for i, (text, _) in enumerate(lines):
+        if QUESTION_RE.match(text):
+            starts.append(i)
+        elif MARKER_ONLY_RE.match(text):
+            # Only a real marker if actual content follows it.
+            nxt = lines[i + 1][0] if i + 1 < len(lines) else ""
+            if nxt.strip() and not MARKER_ONLY_RE.match(nxt) and not QUESTION_RE.match(nxt):
+                starts.append(i)
+    return starts
+
+
 def locate_question_bbox(page, question_text):
     """Find the on-page bounding box for a question's text via verbatim
     search. Falls back to searching just the first line if the full
@@ -58,6 +99,9 @@ def locate_question_bbox(page, question_text):
 
 
 MIN_BOX_HEIGHT = 36
+# Floor for boxes packed into shared leftover space: enough for one line at
+# the smallest render tier (render_box.LINE_HEIGHT_TIERS[-1]).
+MIN_FALLBACK_HEIGHT = 12
 DEFAULT_BOX_HEIGHT = 60
 PAGE_MARGIN = 36
 BOX_GAP = 6
@@ -126,44 +170,91 @@ def _free_gaps_below(line_bboxes, y_from, page_rect):
     return gaps
 
 
-def suggest_answer_box(page, question_bbox, next_question_bbox, page_rect):
+def suggest_answer_box(page, question_bbox, next_question_bbox, page_rect,
+                       line_bboxes=()):
     """Propose an answer box in the gap between this question and the next.
 
-    Returns None when that gap is too thin to write in -- the caller then
-    places the box in free space elsewhere (see fallback_answer_box) rather
-    than drawing it over the following question's text.
+    The gap is bounded by the next question *and* by the next line of
+    printed text below -- a page footer sits below the last question but
+    is not a question, and a box run down to the bottom margin would be
+    drawn straight through it.
+
+    Returns None when the gap is too thin to write in; the caller then
+    packs the box into free space elsewhere (allocate_fallback_boxes).
     """
     y0 = question_bbox[3] + BOX_GAP
     if next_question_bbox is not None:
         y1_limit = next_question_bbox[1] - BOX_GAP
     else:
         y1_limit = page_rect.height - PAGE_MARGIN
+    for lb in line_bboxes:
+        if lb[1] >= y0:
+            y1_limit = min(y1_limit, lb[1] - BOX_GAP)
     if y1_limit - y0 < MIN_BOX_HEIGHT:
         return None
     return [question_bbox[0], y0, page_rect.width - PAGE_MARGIN,
             min(y0 + DEFAULT_BOX_HEIGHT, y1_limit)]
 
 
-def fallback_answer_box(question_bbox, page_rect, occupied):
-    """Place a box for a question with no room before the next one -- a
-    stem like "3. Let f(t) = {...}" whose parts follow immediately.
+def allocate_fallback_boxes(order, blocks, page_rect, occupied):
+    """Place boxes for the questions that have no usable gap after them.
 
-    Picks the largest empty gap below the question, treating both printed
-    text and already-placed boxes as occupied, so these never land on the
-    page's content or on another question's answer space.
+    A tightly-set list ("a." through "j.", a couple of points apart) puts
+    every item in this bucket at once. They are packed into the page's
+    remaining free space **in document order**, top to bottom, sharing it
+    out evenly -- so the answers read in the same order as the questions
+    instead of scattering to whichever gap happened to be biggest, and
+    none of them overlap each other or the printed text.
     """
-    y0 = question_bbox[3] + BOX_GAP
-    gaps = [g for g in _free_gaps_below(occupied, y0, page_rect)
-            if g[1] - g[0] >= MIN_BOX_HEIGHT + BOX_GAP]
-    if gaps:
-        top, bottom = max(gaps, key=lambda g: g[1] - g[0])
-        return [question_bbox[0], top + BOX_GAP,
-                page_rect.width - PAGE_MARGIN,
-                min(top + BOX_GAP + DEFAULT_BOX_HEIGHT, bottom)]
-    # Page is full; keep the box on the page and let the user move it.
-    y1 = min(y0 + MIN_BOX_HEIGHT, page_rect.height - PAGE_MARGIN)
-    return [question_bbox[0], y1 - MIN_BOX_HEIGHT,
-            page_rect.width - PAGE_MARGIN, y1]
+    if not order:
+        return {}
+    gaps = [g for g in _free_gaps_below(occupied, 0, page_rect)
+            if g[1] - g[0] >= MIN_FALLBACK_HEIGHT + BOX_GAP]
+
+    def room_from(gap_index, cursor):
+        """Free space still available at or after (gap_index, cursor)."""
+        total = 0.0
+        for gj in range(gap_index, len(gaps)):
+            top, bottom = gaps[gj]
+            total += max(0.0, bottom - max(top, cursor if gj == gap_index else top))
+        return total
+
+    boxes = {}
+    gi, cursor = 0, (gaps[0][0] if gaps else page_rect.height)
+    for idx, qi in enumerate(order):
+        block = blocks[qi]
+        # Re-derive the height each time from what is actually left and how
+        # many questions still need a home, so a long list degrades into
+        # uniformly short boxes instead of running out and overlapping.
+        remaining = len(order) - idx
+        share = room_from(gi, cursor) / remaining - BOX_GAP
+        height = max(MIN_FALLBACK_HEIGHT, min(DEFAULT_BOX_HEIGHT, share))
+        y0 = None
+        while gi < len(gaps):
+            top, bottom = gaps[gi]
+            start = max(cursor, top, block[3] + BOX_GAP)
+            if bottom - start >= height:
+                y0 = start
+                break
+            gi += 1
+            if gi < len(gaps):
+                cursor = gaps[gi][0]
+        if y0 is None:
+            # Genuinely out of room (more items than the page has blank
+            # space). Stack tight below the last box and squeeze against
+            # whatever text comes next, so the proposal stays inside the
+            # free space even when it ends up too small to write in -- the
+            # user moves these. Overlapping the page's own text would be
+            # worse than a box that is obviously too short.
+            y0 = min(cursor, page_rect.height - PAGE_MARGIN - MIN_FALLBACK_HEIGHT)
+            limit = page_rect.height - PAGE_MARGIN
+            for lb in occupied:
+                if lb[1] >= y0:
+                    limit = min(limit, lb[1] - BOX_GAP)
+            height = max(1.0, min(MIN_FALLBACK_HEIGHT, limit - y0))
+        cursor = y0 + height + BOX_GAP
+        boxes[qi] = [block[0], y0, page_rect.width - PAGE_MARGIN, y0 + height]
+    return boxes
 
 
 def build_question_records(doc):
@@ -173,13 +264,18 @@ def build_question_records(doc):
     records = []
     qid = 0
     for page_index, page in enumerate(doc):
-        page_text = page.get_text()
-        chunks = split_into_questions(page_text)
-        bboxes = []
-        for chunk in chunks:
-            bboxes.append(locate_question_bbox(page, chunk))
+        lines = page_lines(page)
+        starts = _question_start_lines(lines)
+        chunks, bboxes = [], []
+        for si, start in enumerate(starts):
+            end = starts[si + 1] if si + 1 < len(starts) else len(lines)
+            chunk = "\n".join(t for t, _ in lines[start:end]).strip()
+            if not chunk:
+                continue
+            chunks.append(chunk)
+            bboxes.append(list(lines[start][1]))
 
-        line_bboxes = text_line_bboxes(page)
+        line_bboxes = [b for _, b in lines]
         # Two passes: first give every question the gap that follows it,
         # then fit the leftovers (questions with no room before the next
         # one) into whatever space those passes left free. Doing it in this
@@ -195,15 +291,14 @@ def build_question_records(doc):
                     next_bbox = nb
                     break
             blocks[i] = question_block_bbox(line_bboxes, bbox, next_bbox)
-            box = suggest_answer_box(page, blocks[i], next_bbox, page.rect)
+            box = suggest_answer_box(page, blocks[i], next_bbox, page.rect,
+                                     line_bboxes=line_bboxes)
             if box is None:
                 pending.append(i)
             else:
                 boxes[i] = box
         occupied = line_bboxes + list(boxes.values())
-        for i in pending:
-            boxes[i] = fallback_answer_box(blocks[i], page.rect, occupied)
-            occupied.append(boxes[i])
+        boxes.update(allocate_fallback_boxes(pending, blocks, page.rect, occupied))
 
         for i, (chunk, bbox) in enumerate(zip(chunks, bboxes)):
             if bbox is None:
